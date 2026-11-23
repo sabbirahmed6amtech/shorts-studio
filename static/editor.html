@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Editor · Shorts Studio</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body class="editor">
+  <header class="topbar">
+    <a class="brand" href="/"><span class="logo">▶</span>Shorts Studio</a>
+    <nav><a href="/">Videos</a><a href="/schedule.html">Schedule</a><a href="/settings.html">Settings</a></nav>
+  </header>
+
+  <div class="ed">
+    <section class="ed-main">
+      <div class="stage" id="stage">
+        <video id="video" preload="metadata" playsinline></video>
+        <div class="crop hidden" id="crop">
+          <div class="shade" id="shade-l"></div>
+          <div class="shade" id="shade-r"></div>
+          <div class="box" id="crop-box" title="Drag to choose what the vertical Short shows"><span class="tag">9:16 · drag</span></div>
+        </div>
+        <div class="overlay-msg hidden" id="stage-msg"></div>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn sm" id="play" title="Play / pause (Space)">▶ Play</button>
+        <span class="time" id="time">0:00.0 / 0:00</span>
+        <span class="grow"></span>
+        <label class="row" style="font-weight:400" title="Zoom the timeline">
+          <span class="muted small">Zoom</span>
+          <input type="range" id="zoom" min="0" max="100" value="0">
+        </label>
+        <button class="btn sm" id="add-here" title="Add a clip starting at the playhead">+ Clip at playhead</button>
+      </div>
+      <div class="timeline">
+        <div class="hint">Drag across the waveform to create a clip. Drag a clip to move it, or drag its edges to trim. Click a clip to select it.</div>
+        <div id="wave"></div>
+      </div>
+    </section>
+
+    <aside class="ed-side">
+      <div class="side-head">
+        <div class="title" id="job-title">Loading…</div>
+        <div class="row">
+          <span class="muted small grow" id="clip-count"></span>
+          <button class="btn sm" id="rerun" title="Ask Gemini again. Clips you created or edited are kept.">↻ Run AI again</button>
+        </div>
+        <div class="row">
+          <button class="btn sm grow" id="render-all" title="Render every clip that isn't rendered or has changed">Render all</button>
+          <button class="btn sm primary grow" id="schedule-all" title="Upload every clip not on YouTube yet, one per publishing slot">Schedule all</button>
+        </div>
+        <div class="notice warn small hidden" id="ai-msg"></div>
+      </div>
+      <div class="clip-list" id="clips"></div>
+      <div class="detail hidden" id="detail"></div>
+    </aside>
+  </div>
+
+  <script type="module" src="/editor.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shorts Studio</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="logo">▶</span>Shorts Studio</a>
+    <nav><a href="/" class="active">Videos</a><a href="/schedule.html">Schedule</a><a href="/settings.html">Settings</a></nav>
+  </header>
+
+  <main class="page">
+    <section class="card hidden" id="checks-card">
+      <h2>Setup checks</h2>
+      <div class="checks" id="checks"></div>
+    </section>
+
+    <section class="card">
+      <h2>Add a video</h2>
+      <div class="tabs" role="tablist">
+        <button class="active" data-tab="url" role="tab">YouTube link</button>
+        <button data-tab="file" role="tab">Upload a file</button>
+      </div>
+      <form id="url-form" class="row">
+        <input type="url" id="url" class="grow" placeholder="https://www.youtube.com/watch?v=…" required>
+        <button class="btn primary" type="submit">Find clips</button>
+      </form>
+      <form id="file-form" class="hidden">
+        <div class="row">
+          <input type="file" id="file" class="grow" accept=".mp4,.mov,.mkv,.webm,.m4v" required>
+          <button class="btn primary" type="submit">Upload and find clips</button>
+        </div>
+        <div class="bar hidden" id="upload-bar" style="margin-top:10px"><i></i></div>
+      </form>
+      <p class="muted small" style="margin:10px 0 0">The video is downloaded, transcribed on this computer, then Gemini suggests the best clips. You can adjust them or add your own in the editor.</p>
+    </section>
+
+    <section class="card">
+      <h2>Videos</h2>
+      <div class="jobs" id="jobs"><div class="empty">Loading…</div></div>
+    </section>
+  </main>
+
+  <script type="module" src="/index.js"></script>
+</body>
+</html>
