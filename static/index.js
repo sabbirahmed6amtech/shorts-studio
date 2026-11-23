@@ -101,6 +101,7 @@ function jobHtml(j) {
           <span class="pill ${st.cls}">${st.label}${busy && pct ? ` · ${pct}%` : ""}</span>
           ${j.duration ? `<span>${fmtTime(j.duration)}</span>` : ""}
           ${j.transcript_source ? `<span>${{ youtube: "YouTube captions", whisper: "Whisper transcript", none: "No transcript" }[j.transcript_source] || ""}</span>` : ""}
+          ${j.chat_messages ? `<span>Live chat: ${j.chat_messages.toLocaleString()} messages</span>` : ""}
           ${j.status === "ready" ? `<span>${j.clip_count} clip${j.clip_count === 1 ? "" : "s"}</span>` : ""}
           <span>${new Date(j.created_at).toLocaleString()}</span>
         </div>

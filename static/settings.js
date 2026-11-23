@@ -58,6 +58,17 @@ function updatePreview() {
     color: f.caption_color.value,
   });
   $("#cap-preview").style.opacity = f.captions_enabled.checked ? 1 : 0.35;
+  const hook = $("#hook-preview .hook-box");
+  if (hook) {
+    Object.assign(hook.style, {
+      fontFamily: `"cap-${f.caption_font.value}", sans-serif`,
+      fontSize: `${Math.max(10, (Number(f.hook_size.value) || 80) / 4)}px`,
+      color: f.hook_color.value,
+      background: f.hook_bg.value,
+    });
+    hook.textContent = f.caption_uppercase.checked ? "HE TRIED TO GET GTA 6 FOR FREE" : "He tried to get GTA 6 for free";
+    $("#hook-preview").style.opacity = f.hook_enabled.checked ? 1 : 0.35;
+  }
 }
 form.addEventListener("input", updatePreview);
 
@@ -141,6 +152,85 @@ $("#yt-card").addEventListener("click", async (e) => {
     toast(err.message, true);
   }
 });
+
+// ---------- Facebook connection ----------
+
+const FB_STEPS = `
+  <ol class="steps small">
+    <li>At <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">Meta for Developers</a>, create an app with the use case for managing a Page.</li>
+    <li>Give it the permissions <code>pages_show_list</code>, <code>pages_read_engagement</code> and <code>pages_manage_posts</code>.</li>
+    <li>In <b>App settings → Basic</b>, copy the <b>App ID</b> and <b>App Secret</b>.</li>
+    <li>Open <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener">Graph API Explorer</a>, pick your app, add the three permissions, press <b>Generate Access Token</b>, choose your Page, and copy the token.</li>
+    <li>Paste all three below and press <b>Connect</b>. The app swaps the token for a long-lived one; Page tokens made from it don't expire.</li>
+  </ol>
+  <div class="notice small" style="margin-top:10px">
+    Facebook allows about <b>30 Reels a day</b> through the API, <b>3–90 seconds</b> each, scheduled <b>10 minutes to 29 days</b> ahead.
+    If Reels you post don't show up for other people, switch the app from Development to <b>Live</b> mode in the app dashboard.
+  </div>`;
+
+async function loadFacebook() {
+  const body = $("#fb-body");
+  let st;
+  try {
+    st = await api("/api/facebook/status");
+  } catch (e) {
+    body.textContent = e.message;
+    return;
+  }
+  if (!st.connected) {
+    body.innerHTML = `
+      <p class="small" style="margin-top:0">Optional. Post the same Shorts as Facebook Reels on your Page.</p>
+      ${FB_STEPS}
+      <div class="form-grid" style="margin-top:12px">
+        <label>App ID<input type="text" id="fb-app-id" autocomplete="off"></label>
+        <label>App Secret<input type="password" id="fb-app-secret" autocomplete="off"></label>
+        <label class="full">Access token from Graph API Explorer<input type="password" id="fb-token" autocomplete="off"></label>
+      </div>
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="fb-connect">Connect</button></div>`;
+  } else {
+    const p = st.page;
+    body.innerHTML = `
+      <div class="channel">
+        ${p.picture ? `<img src="${esc(p.picture)}" alt="">` : ""}
+        <div class="grow"><b>${esc(p.name)}</b><div class="muted small">Reels go to this Page.</div></div>
+        ${st.pages.length > 1 ? `<select id="fb-page" style="width:auto">${st.pages.map((x) =>
+          `<option value="${esc(x.id)}" ${x.id === p.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>` : ""}
+        <button class="btn" id="fb-disconnect">Disconnect</button>
+      </div>
+      <details style="margin-top:10px"><summary class="small">Setup notes and limits</summary>${FB_STEPS}</details>`;
+  }
+}
+
+$("#fb-card").addEventListener("click", async (e) => {
+  try {
+    if (e.target.id === "fb-connect") {
+      e.target.disabled = true;
+      try {
+        await api("/api/facebook/connect", { method: "POST", body: {
+          app_id: $("#fb-app-id").value, app_secret: $("#fb-app-secret").value, user_token: $("#fb-token").value } });
+      } finally {
+        e.target.disabled = false;
+      }
+      toast("Facebook connected");
+    } else if (e.target.id === "fb-disconnect") {
+      if (!confirm("Disconnect Facebook? Reels already scheduled on Facebook are not affected.")) return;
+      await api("/api/facebook/disconnect", { method: "POST" });
+    } else return;
+    loadFacebook();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+$("#fb-card").addEventListener("change", async (e) => {
+  if (e.target.id !== "fb-page") return;
+  try {
+    await api("/api/facebook/page", { method: "POST", body: { page_id: e.target.value } });
+    loadFacebook();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+loadFacebook();
 
 // Coming back from Google's sign-in page.
 const params = new URLSearchParams(location.search);

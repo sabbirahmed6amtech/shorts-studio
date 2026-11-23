@@ -13,7 +13,7 @@ import threading
 import time
 import traceback
 
-from . import ai, captions, config, loudness, tools, youtube
+from . import ai, captions, chat, config, facebook, loudness, tools, youtube
 from .download import download
 from .render import render, render_sig
 from .transcribe import transcribe
@@ -46,16 +46,23 @@ def start() -> None:
     with config.db() as c:
         rows = c.execute(f"SELECT id FROM jobs WHERE status IN ({','.join('?' * len(BUSY))}) ORDER BY id",
                          BUSY).fetchall()
-        clips = c.execute("SELECT id, render_status, yt_status FROM clips WHERE render_status IN "
-                          "('queued','rendering') OR yt_status IN ('queued','uploading') ORDER BY id").fetchall()
+        clips = c.execute("SELECT id, render_status, yt_status, fb_status FROM clips WHERE render_status IN "
+                          "('queued','rendering') OR yt_status IN ('queued','uploading') "
+                          "OR fb_status IN ('queued','uploading') ORDER BY id").fetchall()
     for r in rows:
         config.update_job(r["id"], status="queued", progress=0)
         enqueue(r["id"])
     for r in clips:  # resume renders/uploads the app was closed in the middle of
+        busy_upload = False
         if r["yt_status"] in ("queued", "uploading"):
             config.update_clip(r["id"], yt_status="queued", yt_progress=0)
             enqueue_output(r["id"], "upload")
-        else:
+            busy_upload = True
+        if r["fb_status"] in ("queued", "uploading"):
+            config.update_clip(r["id"], fb_status="queued", fb_progress=0)
+            enqueue_output(r["id"], "fb_upload")
+            busy_upload = True
+        if not busy_upload:
             config.update_clip(r["id"], render_status="queued", render_progress=0)
             enqueue_output(r["id"], "render")
     threading.Thread(target=_loop, name="worker", daemon=True).start()
@@ -96,11 +103,17 @@ def _out_loop() -> None:
                 if clip["yt_status"] != "queued":
                     continue  # cancelled
                 _upload(clip)
+            elif kind == "fb_upload":
+                if clip["fb_status"] != "queued":
+                    continue  # cancelled
+                _fb_upload(clip)
         except Exception as e:
             traceback.print_exc()
             msg = str(e)[:500]
             if kind == "render":
                 config.update_clip(clip_id, render_status="error", render_error=msg)
+            elif kind == "fb_upload":
+                config.update_clip(clip_id, fb_status="error", fb_error=msg)
             else:
                 config.update_clip(clip_id, yt_status="error", yt_error=msg)
 
@@ -144,17 +157,35 @@ def _render(clip: dict) -> dict:
     return config.get_clip(clip["id"])
 
 
+def _ensure_render(clip: dict, s: dict) -> dict:
+    """Render (or re-render) first if the file is missing or out of date."""
+    if render_is_current(clip, s):
+        return clip
+    config.update_clip(clip["id"], render_status="queued")
+    try:
+        return _render(config.get_clip(clip["id"]))
+    except Exception as e:
+        config.update_clip(clip["id"], render_status="error", render_error=str(e)[:500])
+        raise RuntimeError(f"Rendering failed, so nothing was uploaded: {e}")
+
+
+def _fb_upload(clip: dict) -> None:
+    job = config.get_job(clip["job_id"])
+    config.update_clip(clip["id"], fb_status="uploading", fb_progress=0, fb_error=None)
+    facebook.check_length(clip["end"] - clip["start"])  # fail before spending time on a render
+    clip = _ensure_render(clip, config.get_settings())
+    path = config.job_dir(clip["job_id"]) / "clips" / clip["render_file"]
+    video_id = facebook.upload(path, clip, job, _Throttle(clip["id"], "fb_progress", config.update_clip))
+    scheduled = bool(clip.get("fb_publish_at"))
+    config.update_clip(clip["id"], fb_status="scheduled" if scheduled else "published", fb_progress=1,
+                       fb_video_id=video_id, fb_uploaded_at=config.now_iso())
+
+
 def _upload(clip: dict) -> None:
     s = config.get_settings()
     job = config.get_job(clip["job_id"])
     config.update_clip(clip["id"], yt_status="uploading", yt_progress=0, yt_error=None)
-    if not render_is_current(clip, s):  # render (or re-render) first, then upload
-        config.update_clip(clip["id"], render_status="queued")
-        try:
-            clip = _render(config.get_clip(clip["id"]))
-        except Exception as e:
-            config.update_clip(clip["id"], render_status="error", render_error=str(e)[:500])
-            raise RuntimeError(f"Rendering failed, so nothing was uploaded: {e}")
+    clip = _ensure_render(clip, s)
     path = config.job_dir(clip["job_id"]) / "clips" / clip["render_file"]
     video_id = youtube.upload(path, clip, job, s, _Throttle(clip["id"], "yt_progress", config.update_clip))
     scheduled = bool(clip.get("yt_publish_at")) and \
@@ -197,6 +228,10 @@ def _process(job_id: int) -> None:
     if not tr.exists():
         _make_transcript(job, d, wav, meta["duration"], tr, job_id)
 
+    # 3b. Live chat replay (past streams only). Never fails the job.
+    if job["source"] == "url" and config.get_settings()["chat_hints"] and not (d / "chat.json").exists():
+        _fetch_chat(job, d, meta["duration"], job_id)
+
     # 4. Gemini
     _analyze(job_id)
 
@@ -229,6 +264,22 @@ def _make_transcript(job: dict, d, wav, duration: float, tr, job_id: int) -> Non
     config.update_job(job_id, transcript_source="none", message=note if mode == "youtube" else None)
 
 
+def _fetch_chat(job: dict, d, duration: float, job_id: int) -> None:
+    config.update_job(job_id, status="transcribing", progress=0, message="Reading the live chat replay…")
+    try:
+        raw, note = chat.fetch(job["url"], d)
+        if raw:
+            data = chat.parse(raw, d / "chat.json", duration)
+        else:
+            # Remember there's no chat, so a resumed job doesn't ask again.
+            data = {"per_second": [], "samples": {}, "total": 0}
+            (d / "chat.json").write_text(json.dumps(data), encoding="utf-8")
+        config.update_job(job_id, chat_messages=data["total"], message=note or None)
+    except Exception as e:
+        traceback.print_exc()
+        config.update_job(job_id, message=f"Skipped the live chat: {str(e)[:150]}")
+
+
 def _analyze(job_id: int) -> None:
     job = config.get_job(job_id)
     tr = config.job_dir(job_id) / "transcript.json"
@@ -240,8 +291,13 @@ def _analyze(job_id: int) -> None:
     try:
         lines = data["lines"]
         wav = config.job_dir(job_id) / "audio.wav"
-        if s["loudness_hints"] and wav.exists():
-            lines = loudness.annotate(lines, wav, job["duration"] or data["duration"])
+        chat_file = config.job_dir(job_id) / "chat.json"
+        measure = None
+        if s["chat_hints"] and chat_file.exists():
+            measure = chat.spikes(json.loads(chat_file.read_text(encoding="utf-8")))
+        use_wav = wav if s["loudness_hints"] and wav.exists() else None
+        if use_wav or measure:
+            lines = loudness.annotate(lines, use_wav, job["duration"] or data["duration"], chat=measure)
         suggestions = ai.suggest(lines, s, job["title"] or "")
         tags = [t if t.startswith("#") else f"#{t}" for t in s["default_hashtags"].split()]
         clips = ai.to_clips(suggestions, lines, s, job["duration"] or data["duration"], tags)
@@ -253,10 +309,11 @@ def _analyze(job_id: int) -> None:
         c.execute("DELETE FROM clips WHERE job_id = ? AND origin = 'ai' AND edited = 0", (job_id,))
         for cl in clips:
             c.execute(
-                "INSERT INTO clips(job_id, start, end, score, title, description, hashtags, hook, reason, origin, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?, 'ai', ?)",
+                "INSERT INTO clips(job_id, start, end, score, title, description, hashtags, hook, reason, hook_title,"
+                " origin, created_at) VALUES (?,?,?,?,?,?,?,?,?,?, 'ai', ?)",
                 (job_id, cl["start"], cl["end"], cl["score"], cl["title"], cl["description"],
-                 json.dumps(cl["hashtags"], ensure_ascii=False), cl["hook"], cl["reason"], config.now_iso()),
+                 json.dumps(cl["hashtags"], ensure_ascii=False), cl["hook"], cl["reason"], cl["hook_title"],
+                 config.now_iso()),
             )
     note = None if clips else "Gemini found no clips that fit your length settings. Try a wider range in Settings."
     config.update_job(job_id, status="ready", progress=1, ai_error=note)

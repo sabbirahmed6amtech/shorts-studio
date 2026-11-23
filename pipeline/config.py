@@ -16,6 +16,7 @@ STATIC_DIR = ROOT / "static"
 FONTS_DIR = ROOT / "fonts"
 YT_CLIENT_PATH = DATA_DIR / "youtube_client.json"
 YT_TOKEN_PATH = DATA_DIR / "youtube_token.json"
+FB_PATH = DATA_DIR / "facebook.json"  # Facebook app + Page tokens (kept out of settings)
 
 DEFAULT_SETTINGS = {
     "gemini_api_key": "",
@@ -23,6 +24,7 @@ DEFAULT_SETTINGS = {
     "gemini_fallback_model": "gemini-3.5-flash-lite",  # tried when the main model is overloaded
     "transcript_source": "auto",  # auto | youtube | whisper | none
     "loudness_hints": True,    # tell Gemini where the audio gets loud, incl. stretches with no speech
+    "chat_hints": True,        # for past live streams: tell Gemini where chat explodes
     "whisper_fast": True,      # greedy decoding: much faster, slightly less accurate
     "whisper_model": "small",
     "whisper_device": "cpu",
@@ -44,15 +46,25 @@ DEFAULT_SETTINGS = {
     "caption_words": 3,        # words on screen at once
     "caption_position": 30,    # % of the height, measured up from the bottom
     "caption_uppercase": True,
+    # hook title (banner at the top for the first seconds)
+    "hook_enabled": True,
+    "hook_seconds": 3,
+    "hook_size": 80,
+    "hook_color": "#000000",
+    "hook_bg": "#FFFFFF",
     # YouTube
     "yt_category": "22",       # People & Blogs
     "yt_publish_time": "18:00",
     "yt_gap_hours": 24,
     "yt_now_privacy": "public",
     "yt_made_for_kids": False,
+    # "Schedule all" sends to these platforms (when connected)
+    "schedule_youtube": True,
+    "schedule_facebook": True,
 }
 
-CAPTION_KEYS = [k for k in DEFAULT_SETTINGS if k.startswith("caption")]
+# Settings that change how a rendered video looks; changing one makes renders out of date.
+CAPTION_KEYS = [k for k in DEFAULT_SETTINGS if k.startswith(("caption", "hook"))]
 
 _lock = threading.Lock()
 
@@ -141,6 +153,7 @@ JOB_COLUMNS = [
     ("layout", "TEXT DEFAULT 'single'"),     # 'single' (one 9:16 crop) | 'split' (streamer on top, content below)
     ("layout_json", "TEXT"),                 # {"split": 0.4, "cam": {x,y,w,h}, "content": {x,y,w,h}}, 0..1 of the frame
     ("transcript_source", "TEXT"),           # where the transcript came from: youtube | whisper | none
+    ("chat_messages", "INTEGER"),            # live chat replay messages found (NULL = not checked)
 ]
 
 CLIP_COLUMNS = [
@@ -157,6 +170,13 @@ CLIP_COLUMNS = [
     ("yt_video_id", "TEXT"),
     ("yt_error", "TEXT"),
     ("yt_uploaded_at", "TEXT"),
+    ("hook_title", "TEXT DEFAULT ''"),       # banner text for the first seconds
+    ("fb_status", "TEXT DEFAULT ''"),        # '' | queued | uploading | scheduled | published | error
+    ("fb_progress", "REAL DEFAULT 0"),
+    ("fb_publish_at", "TEXT"),
+    ("fb_video_id", "TEXT"),
+    ("fb_error", "TEXT"),
+    ("fb_uploaded_at", "TEXT"),
 ]
 
 

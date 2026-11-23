@@ -161,7 +161,14 @@ def probe(path: Path) -> dict:
     rotation = rotation or int(float((video.get("tags") or {}).get("rotate", 0) or 0))
     if abs(rotation) % 180 == 90:
         width, height = height, width
+    fps = None
+    try:
+        num, den = (video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1").split("/")
+        fps = float(num) / float(den) if float(den) else None
+    except (ValueError, ZeroDivisionError):
+        pass
     return {
+        "fps": fps,
         "duration": float(data.get("format", {}).get("duration") or 0),
         "vcodec": video.get("codec_name"),
         "acodec": audio.get("codec_name"),

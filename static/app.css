@@ -228,3 +228,4 @@ table.sched th { font-size: 12px; color: var(--muted); font-weight: 600; }
   .preview-col { border-left: 0; border-top: 1px solid #222; }
   .preview-col canvas { height: 320px; max-height: none; }
 }
+.cap-preview .hook-box { text-shadow: none; padding: 4px 8px; border-radius: 2px; }

@@ -16,6 +16,7 @@ let regions = null;
 let adding = false; // true while we add regions from code, so they aren't mistaken for user drags
 let fitPx = 1;
 let yt = { connected: false };
+let fb = { connected: false };
 let settings = {};
 let pollTimer = null;
 let outSig = "";
@@ -77,7 +78,8 @@ async function init() {
     api(`/api/jobs/${jobId}/transcript`).catch(() => ({ words: [] })),
     api("/api/youtube/status").catch(() => ({ connected: false })),
     api("/api/settings").catch(() => ({})),
-  ]).then((r) => { settings = r[4]; return r; });
+    api("/api/facebook/status").catch(() => ({ connected: false })),
+  ]).then((r) => { settings = r[4]; fb = r[5]; return r; });
   yt = ytStatus;
   loadLayout();
   clips = clipList;
@@ -281,6 +283,11 @@ function flagsHtml(c) {
   else if (c.yt_status === "scheduled") f.push(`<span class="flag ok">⏰ ${when(c.yt_publish_at)}</span>`);
   else if (c.yt_status === "published") f.push(`<span class="flag ok">On YouTube</span>`);
   else if (c.yt_status === "error") f.push(`<span class="flag err">Upload failed</span>`);
+  if (c.fb_status === "queued") f.push(`<span class="flag busy">FB: waiting</span>`);
+  else if (c.fb_status === "uploading") f.push(`<span class="flag busy">FB: posting ${pct(c.fb_progress)}</span>`);
+  else if (c.fb_status === "scheduled") f.push(`<span class="flag ok">FB ⏰ ${when(c.fb_publish_at)}</span>`);
+  else if (c.fb_status === "published") f.push(`<span class="flag ok">On Facebook</span>`);
+  else if (c.fb_status === "error") f.push(`<span class="flag err">FB failed</span>`);
   return f.length ? `<div class="flags">${f.join("")}</div>` : "";
 }
 
@@ -330,6 +337,9 @@ function renderDetail() {
     <label>Title <span class="hint" id="title-count"></span>
       <input type="text" id="f-title" maxlength="100" value="${esc(c.title)}" placeholder="Short, catchy title">
     </label>
+    <label>Hook title <span class="hint">big banner for the first ${settings.hook_seconds ?? 3}s${settings.hook_enabled === false ? " (turned off in Settings)" : ""}</span>
+      <input type="text" id="f-hook" maxlength="80" value="${esc(c.hook_title)}" placeholder="e.g. He tried to get GTA 6 for free">
+    </label>
     <label>Description
       <textarea id="f-desc" rows="3" placeholder="What this Short is about">${esc(c.description)}</textarea>
     </label>
@@ -361,6 +371,7 @@ function renderDetail() {
   };
   $("#f-title").addEventListener("change", (e) => saveText({ title: e.target.value }));
   $("#f-desc").addEventListener("change", (e) => saveText({ description: e.target.value }));
+  $("#f-hook").addEventListener("change", (e) => saveText({ hook_title: e.target.value }));
   $("#f-tags").addEventListener("change", (e) =>
     saveText({ hashtags: e.target.value.split(/[\s,]+/).filter(Boolean) }));
 
@@ -472,24 +483,63 @@ function youtubeSection(c) {
     ${yt.error ? `<div class="notice warn small">${esc(yt.error)}</div>` : ""}${body}</div>`;
 }
 
+function facebookSection(c) {
+  const len = c.end - c.start;
+  let body;
+  if (c.fb_status === "queued" || c.fb_status === "uploading") {
+    const label = c.fb_status === "queued" ? "Waiting to post…"
+      : c.render_status === "rendering" ? "Rendering before posting…" : `Posting ${pct(c.fb_progress)}`;
+    body = `
+      <div class="row"><span class="grow small">${label}${c.fb_publish_at ? ` · goes live ${when(c.fb_publish_at)}` : ""}</span>
+        ${c.fb_status === "queued" ? `<button class="btn sm" data-act="cancel">Cancel</button>` : ""}</div>
+      <div class="bar"><i style="width:${pct(c.fb_progress)}"></i></div>`;
+  } else if (c.fb_status === "scheduled" || c.fb_status === "published") {
+    const live = c.fb_status === "published" || new Date(c.fb_publish_at) <= new Date();
+    body = `<div class="small">${live ? "Posted" : "Scheduled for"} ${c.fb_publish_at ? `<b>${when(c.fb_publish_at)}</b>` : ""}${fb.page ? ` on ${esc(fb.page.name)}` : ""}.</div>
+      <div class="small"><a href="https://www.facebook.com/reel/${c.fb_video_id}" target="_blank" rel="noopener">Open on Facebook</a> ·
+        <a href="https://business.facebook.com/latest/content_calendar" target="_blank" rel="noopener">Meta Business Suite</a></div>
+      <div class="muted small">Edits here don't update Facebook.</div>`;
+  } else if (!fb.connected) {
+    body = `<div class="small muted">Connect a Facebook Page in <a href="/settings.html">Settings</a> to post Reels.</div>`;
+  } else if (len < 3 || len > 90.5) {
+    body = `<div class="small muted">Facebook Reels must be 3–90 seconds; this clip is ${Math.round(len)}s.</div>`;
+  } else {
+    body = `
+      ${c.fb_status === "error" ? `<div class="notice err small">${esc(c.fb_error)}</div>` : ""}
+      <label>Publish on <span class="hint">10 minutes to 29 days ahead</span>
+        <input type="datetime-local" id="fb-when">
+      </label>
+      <div class="row">
+        <button class="btn sm primary" data-act="fb-schedule">Schedule</button>
+        <span class="muted small">or</span>
+        <button class="btn sm" data-act="fb-now">Post now</button>
+      </div>`;
+  }
+  return `<div class="out-block"><h3>Facebook Reels${fb.page ? ` <span class="muted small">· ${esc(fb.page.name)}</span>` : ""}</h3>${body}</div>`;
+}
+
 function renderOutput(c, force = false) {
   const el = $("#clip-out");
   if (!el || !c) return;
   const sig = JSON.stringify([c.id, c.render_status, pct(c.render_progress), c.render_current, c.render_file,
-    c.render_error, c.yt_status, pct(c.yt_progress), c.yt_error, c.yt_video_id, c.yt_publish_at, yt.connected]);
+    c.render_error, c.yt_status, pct(c.yt_progress), c.yt_error, c.yt_video_id, c.yt_publish_at, yt.connected,
+    c.fb_status, pct(c.fb_progress), c.fb_error, c.fb_video_id, c.fb_publish_at, fb.connected, c.end - c.start]);
   if (!force && sig === outSig) return; // don't wipe a time the user is typing
   outSig = sig;
-  el.innerHTML = renderSection(c) + youtubeSection(c);
-  const input = $("#yt-when");
-  if (input) {
-    api(`/api/youtube/next-slots?n=1&clip=${c.id}`)
-      .then(([slot]) => { if (input.isConnected && !input.value) input.value = toLocalInput(slot); })
+  el.innerHTML = renderSection(c) + youtubeSection(c) + facebookSection(c);
+  const inputs = ["#yt-when", "#fb-when"].map((q) => $(q)).filter(Boolean);
+  if (inputs.length) {
+    // Suggest the same slot on both platforms: YouTube's if it's already scheduled, else the next free one.
+    const fixed = c.yt_publish_at || c.fb_publish_at;
+    const slot = fixed ? Promise.resolve([fixed]) : api(`/api/youtube/next-slots?n=1&clip=${c.id}`);
+    slot.then(([t]) => inputs.forEach((i) => { if (i.isConnected && !i.value) i.value = toLocalInput(t); }))
       .catch(() => {});
   }
 }
 
 const anyBusy = () => clips.some((c) =>
-  ["queued", "rendering"].includes(c.render_status) || ["queued", "uploading"].includes(c.yt_status));
+  ["queued", "rendering"].includes(c.render_status) || ["queued", "uploading"].includes(c.yt_status) ||
+  ["queued", "uploading"].includes(c.fb_status));
 
 function ensurePolling() {
   if (pollTimer || !anyBusy()) return;
@@ -520,6 +570,13 @@ async function clipAction(c, act) {
     const v = $("#yt-when").value;
     if (!v) return toast("Pick a date and time", true);
     updated = await api(`/api/clips/${c.id}/youtube`, { method: "POST", body: { publish_at: new Date(v).toISOString() } });
+  } else if (act === "fb-schedule") {
+    const v = $("#fb-when").value;
+    if (!v) return toast("Pick a date and time", true);
+    updated = await api(`/api/clips/${c.id}/facebook`, { method: "POST", body: { publish_at: new Date(v).toISOString() } });
+  } else if (act === "fb-now") {
+    if (!confirm(`Post this Reel to ${fb.page?.name || "your Facebook Page"} right now?`)) return;
+    updated = await api(`/api/clips/${c.id}/facebook`, { method: "POST", body: {} });
   } else if (act === "upload-now") {
     const privacy = $("#yt-privacy").value;
     if (privacy === "public" && !confirm("Upload and publish this Short publicly right now?")) return;
@@ -567,13 +624,15 @@ $("#render-all").addEventListener("click", async () => {
 });
 
 $("#schedule-all").addEventListener("click", async () => {
-  if (!yt.connected) return toast("Connect YouTube in Settings first.", true);
-  const todo = clips.filter((c) => !c.yt_status || c.yt_status === "error");
-  if (!todo.length) return toast("Every clip is already on YouTube or uploading.");
   try {
-    const slots = await api(`/api/youtube/next-slots?n=${todo.length}`);
-    if (!confirm(`Upload ${todo.length} clip${todo.length === 1 ? "" : "s"}, best score first, one per slot from ` +
-      `${when(slots[0])} to ${when(slots[slots.length - 1])}? Each is rendered first if needed.`)) return;
+    const plan = await api(`/api/jobs/${jobId}/schedule-all?dry_run=1`, { method: "POST" });
+    if (!plan.queued) return toast("Every clip is already posted or on its way.");
+    const n = plan.queued;
+    let msg = `Post ${n} clip${n === 1 ? "" : "s"} to ${plan.platforms.join(" and ")}, best score first, one per slot from ` +
+      `${when(plan.slots[0])} to ${when(plan.slots[plan.slots.length - 1])}? Each is rendered first if needed.`;
+    if (plan.fb_skipped_length) msg += `\n\n${plan.fb_skipped_length} clip(s) are longer than 90s and will skip Facebook.`;
+    if (plan.fb_skipped_far) msg += `\n\n${plan.fb_skipped_far} slot(s) are more than 29 days away and will skip Facebook.`;
+    if (!confirm(msg)) return;
     const r = await api(`/api/jobs/${jobId}/schedule-all`, { method: "POST" });
     toast(`Scheduled ${r.queued} clip${r.queued === 1 ? "" : "s"}`);
     await reloadClips();

@@ -14,6 +14,8 @@ class ClipSuggestion(BaseModel):
     hook: str = Field(description="The opening line that grabs attention")
     reason: str = Field(description="One sentence: why this works as a Short")
     title: str = Field(description="YouTube Shorts title, under 70 characters, no hashtags")
+    hook_title: str = Field(description="Big text banner shown on the video for its first seconds: "
+                                        "3 to 7 punchy words that make people stay, no emoji, no hashtags")
     description: str = Field(description="2-3 sentence YouTube description")
     hashtags: list[str] = Field(description="3-6 relevant hashtags, each starting with #")
 
@@ -30,16 +32,25 @@ def _fmt(t: float) -> str:
 
 def _line(i: int, l: dict) -> str:
     loud = l.get("loud")
-    mark = {"loud": "LOUD", "very loud": "VERY LOUD", "silent": "silent"}.get(loud, "")
+    marks = []
     if l.get("nospeech"):
-        return f"L{i} [{_fmt(l['start'])}] (no speech{' · ' + mark if mark else ''})"
-    return f"L{i} [{_fmt(l['start'])}] {'(' + mark + ') ' if mark and loud != 'silent' else ''}{l['text']}"
+        marks.append("no speech")
+    m = {"loud": "LOUD", "very loud": "VERY LOUD", "silent": "silent" if l.get("nospeech") else ""}.get(loud, "")
+    if m:
+        marks.append(m)
+    if l.get("chat"):
+        msgs = ", ".join('"' + x.replace('"', "'")[:30] + '"' for x in (l.get("chat_msgs") or []))
+        marks.append(f"CHAT x{l['chat']:g}" + (f": {msgs}" if msgs else ""))
+    head = f"L{i} [{_fmt(l['start'])}]"
+    tag = f"({' · '.join(marks)})" if marks else ""
+    return " ".join(x for x in (head, tag, l.get("text", "")) if x)
 
 
 def build_prompt(lines: list[dict], s: dict, title: str = "") -> str:
     transcript = "\n".join(_line(i, l) for i, l in enumerate(lines))
     tone = f"\nThe creator wants clips that are: {s['tone']}." if s.get("tone") else ""
     has_sound = any("loud" in l for l in lines)
+    has_chat = any("chat" in l for l in lines)
     speech = any(not l.get("nospeech") for l in lines)
     sound_help = """
 Some lines carry sound markers. (LOUD) and (VERY LOUD) mean the audio there is much
@@ -49,6 +60,14 @@ In streams and gaming videos the loudest moments are often the most exciting, so
 strong clip can build up to a loud moment and include its reaction. Clips may include
 no-speech lines.
 """ if has_sound else ""
+    chat_help = """
+This was a live stream. (CHAT x3: "w", "no way") means viewers sent messages 3 times
+faster than usual right after this line, with a few of the messages they sent. Chat
+reacts 5-15 seconds after something happens, so the moment itself is usually on this
+line or just before it. Big chat spikes are strong evidence of a clip-worthy moment;
+read the messages to understand what happened (but ignore spikes where the streamer
+just asked chat to type something).
+""" if has_chat else ""
     no_speech_help = """
 There is little or no speech in this video, so judge mainly by loudness and pacing,
 and write titles from the video title and what the sound suggests is happening.
@@ -63,10 +82,12 @@ Each segment must:
 - be a complete moment that makes sense without the rest of the video,
 - end on a payoff, not mid-idea,
 - not overlap other segments.{tone}
-{sound_help}{no_speech_help}
+{sound_help}{chat_help}{no_speech_help}
 Score each 0-100 for how likely it is to perform well as a Short (hook strength,
 clarity without context, emotional or surprising payoff, broad interest).
-Write the title, description and hashtags in the same language as the transcript
+For each segment also write a hook_title: a short on-screen banner (3-7 words, no emoji)
+that teases the payoff and makes viewers keep watching, e.g. "He tried to get GTA 6 for free".
+Write the title, hook_title, description and hashtags in the same language as the transcript
 (or the video title if there is no speech).
 Return the segments using line numbers, best first.
 
@@ -158,6 +179,7 @@ def to_clips(suggestions: list[ClipSuggestion], lines: list[dict], s: dict, dura
             "start": round(start, 2), "end": round(end, 2),
             "score": max(0, min(100, int(sug.score))),
             "title": sug.title.strip()[:100], "description": sug.description.strip(),
+            "hook_title": (sug.hook_title or "").strip()[:80],
             "hashtags": [t.replace(" ", "") for t in tags], "hook": sug.hook.strip(),
             "reason": sug.reason.strip(),
         })

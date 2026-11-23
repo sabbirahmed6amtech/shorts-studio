@@ -19,6 +19,11 @@
       <div id="yt-body" class="muted">Checking…</div>
     </section>
 
+    <section class="card" id="fb-card">
+      <h2>Facebook Page (Reels)</h2>
+      <div id="fb-body" class="muted">Checking…</div>
+    </section>
+
     <form id="form" class="page" style="padding:0">
       <section class="card">
         <h2>Gemini</h2>
@@ -82,6 +87,14 @@
           <label>Text colour<input type="color" name="caption_color"></label>
           <label>Spoken word colour<input type="color" name="caption_highlight"></label>
           <label class="check-label"><input type="checkbox" name="caption_uppercase"> UPPERCASE</label>
+          <h3 class="full" style="margin-top:6px">Hook title</h3>
+          <label class="check-label full"><input type="checkbox" name="hook_enabled"> Show a hook title banner at the start of each Short</label>
+          <div class="cap-preview full" id="hook-preview" aria-hidden="true" style="height:90px"><span class="hook-box">HE TRIED TO GET GTA 6 FOR FREE</span></div>
+          <label>Show for (seconds)<input type="number" name="hook_seconds" min="1" max="10" required></label>
+          <label>Text size<input type="number" name="hook_size" min="30" max="160" required></label>
+          <label>Text colour<input type="color" name="hook_color"></label>
+          <label>Box colour<input type="color" name="hook_bg"></label>
+          <span class="hint full">Gemini writes the hook for each clip; edit it in the editor. Emoji are left out because the video renderer can't draw them. With Streamer + content, the banner sits on the line between the two parts so it doesn't cover the streamer.</span>
         </div>
       </section>
 
@@ -109,6 +122,9 @@
             </select>
           </label>
           <label class="check-label full"><input type="checkbox" name="yt_made_for_kids"> These videos are made for kids</label>
+          <span class="full small" style="font-weight:600">"Schedule all" posts to:</span>
+          <label class="check-label"><input type="checkbox" name="schedule_youtube"> YouTube Shorts</label>
+          <label class="check-label"><input type="checkbox" name="schedule_facebook"> Facebook Reels</label>
         </div>
       </section>
 
@@ -125,6 +141,7 @@
             <span class="hint">YouTube captions take seconds instead of minutes. Auto-generated ones include word timing, so captions stay in sync. Uploaded files always use Whisper (or nothing). Applies to new videos.</span>
           </label>
           <label class="check-label full"><input type="checkbox" name="loudness_hints"> Loudness hints: tell Gemini where the audio gets loud, including stretches with no speech</label>
+          <label class="check-label full"><input type="checkbox" name="chat_hints"> Live chat hints: for past live streams, tell Gemini where chat explodes (and what viewers typed)</label>
           <span class="hint full" style="margin-top:-10px">Helps with streams and gaming, where the best moments are reactions and action rather than talking.</span>
           <label class="check-label full"><input type="checkbox" name="whisper_fast"> Faster Whisper: about twice as fast, slightly less accurate</label>
           <label>Whisper model

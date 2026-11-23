@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -29,6 +30,7 @@ def render_sig(clip: dict, settings: dict, job: dict | None = None) -> str:
     layout = job_layout(job)
     data = {"start": clip["start"], "end": clip["end"],
             "crop": layout if layout else round(clip.get("crop_x") or 0.5, 3),
+            "hook": clip.get("hook_title") or "",
             **{k: settings[k] for k in config.CAPTION_KEYS}}
     return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -52,10 +54,22 @@ def _ass_time(t: float) -> str:
     return f"{h}:{m:02}:{s:02}.{cs:02}"
 
 
-def _clean(word: str, upper: bool) -> str:
+# The caption renderer can't draw colour emoji; drop them (but keep U+200C/U+200D,
+# which Bengali and other scripts need to join letters).
+_EMOJI = re.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\u2B00-\u2BFF\uFE0E\uFE0F\u20E3]")
+_BENGALI = re.compile("[\u0980-\u09FF]")
+BENGALI_FONT = "Noto Sans Bengali"  # bundled in fonts/, so Windows and Mac render the same
+
+
+def _clean(word: str, upper: bool, base_font: str = "") -> str:
     # Braces and backslashes are ASS control characters.
-    word = word.replace("\\", "/").replace("{", "(").replace("}", ")")
-    return word.upper() if upper else word
+    word = _EMOJI.sub("", word).replace("\\", "/").replace("{", "(").replace("}", ")")
+    if upper:
+        word = word.upper()
+    if base_font and _BENGALI.search(word):
+        # Display fonts like Anton have no Bengali letters: switch font for this word only.
+        word = f"{{\\fn{BENGALI_FONT}\\b1}}{word}{{\\fn{base_font}\\b0}}"
+    return word
 
 
 def caption_chunks(words: list[dict], start: float, end: float, per_chunk: int, max_gap: float = 0.7):
@@ -78,13 +92,29 @@ def caption_chunks(words: list[dict], start: float, end: float, per_chunk: int, 
     return chunks
 
 
-def build_ass(words: list[dict], clip: dict, s: dict, split: float | None = None) -> str:
+def build_ass(words: list[dict], clip: dict, s: dict, split: float | None = None, captions: bool = True) -> str:
     primary, highlight = _ass_color(s["caption_color"]), _ass_color(s["caption_highlight"])
     size = max(30, min(200, int(s["caption_size"])))
+    font = s["caption_font"]
     if split:  # streamer + content: centre the captions on the line between the two parts
         margin_v = int(OUT_H * (1 - split) - size * 0.55)
     else:
         margin_v = int(OUT_H * max(2, min(90, int(s["caption_position"]))) / 100)
+
+    # Hook title: a boxed banner for the first seconds. At the top for a single crop; on the
+    # line between the parts for streamer + content, so it doesn't cover the streamer's face.
+    hook = _EMOJI.sub("", clip.get("hook_title") or "").replace("\n", " ").strip()
+    hook_on = bool(s["hook_enabled"]) and bool(hook)
+    hook_secs = max(1, min(10, int(s["hook_seconds"])))
+    hook_size = max(30, min(160, int(s["hook_size"])))
+    pad = max(10, hook_size // 3)
+    if split:
+        hook_margin = int(OUT_H * (1 - split) - hook_size * 0.6)  # centred on the seam
+        cap_low = max(40, margin_v - int(hook_size * 2.6))        # captions move down while it shows
+    else:
+        hook_margin = int(OUT_H * 0.10)
+        cap_low = margin_v
+    hook_align = 2 if split else 8  # 2 = bottom-centre anchor (seam), 8 = top-centre
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {OUT_W}
@@ -94,7 +124,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,{s['caption_font']},{size},{primary},{primary},&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{max(2, size // 14)},2,2,80,80,{margin_v},1
+Style: Cap,{font},{size},{primary},{primary},&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{max(2, size // 14)},2,2,80,80,{margin_v},1
+Style: CapLow,{font},{size},{primary},{primary},&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{max(2, size // 14)},2,2,80,80,{cap_low},1
+Style: Hook,{font},{hook_size},{_ass_color(s['hook_color'])},{_ass_color(s['hook_color'])},{_ass_color(s['hook_bg'])},{_ass_color(s['hook_bg'])},0,0,0,0,100,100,0,0,3,{pad},0,{hook_align},110,110,{hook_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -102,7 +134,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     duration = clip["end"] - clip["start"]
     upper = bool(s["caption_uppercase"])
     lines = []
-    chunks = caption_chunks(words, clip["start"], clip["end"], max(1, int(s["caption_words"])))
+    if hook_on:
+        text = " ".join(_clean(w, upper, font) for w in hook.split())
+        lines.append(f"Dialogue: 1,{_ass_time(0)},{_ass_time(min(hook_secs, duration))},Hook,,0,0,0,,{{\\fad(150,250)}}{text}")
+    chunks = caption_chunks(words, clip["start"], clip["end"], max(1, int(s["caption_words"]))) if captions else []
     for ci, chunk in enumerate(chunks):
         next_start = chunks[ci + 1][0]["s"] if ci + 1 < len(chunks) else duration
         for i, w in enumerate(chunk):
@@ -111,10 +146,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if t1 - t0 < 0.02:
                 continue
             text = " ".join(
-                f"{{\\c{highlight}}}{_clean(x['w'], upper)}{{\\c{primary}}}" if j == i else _clean(x["w"], upper)
+                f"{{\\c{highlight}}}{_clean(x['w'], upper, font)}{{\\c{primary}}}" if j == i else _clean(x["w"], upper, font)
                 for j, x in enumerate(chunk)
             )
-            lines.append(f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Cap,,0,0,0,,{text}")
+            style = "CapLow" if hook_on and split and t0 < hook_secs else "Cap"
+            lines.append(f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},{style},,0,0,0,,{text}")
     return header + "\n".join(lines) + "\n"
 
 
@@ -147,6 +183,18 @@ def fit_rect(r: dict, width: int, height: int, out_w: int, out_h: int) -> tuple[
     return w, h, x, y
 
 
+def _filter_path(path: Path, cwd: Path) -> str:
+    """A path ffmpeg's filter syntax accepts. ':' is a separator there, which breaks Windows
+    drive letters (C:\\...), so prefer a relative path; otherwise escape the colon."""
+    try:
+        rel = os.path.relpath(path, cwd)  # ValueError on Windows when on another drive
+        if ":" not in rel:
+            return Path(rel).as_posix().replace("'", "\\'")
+    except ValueError:
+        pass
+    return path.resolve().as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
 # ---------- render ----------
 
 def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float], None]) -> Path:
@@ -156,9 +204,10 @@ def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float],
     if not info["libx264"]:
         raise RuntimeError("This ffmpeg has no H.264 encoder (libx264). Install a full ffmpeg build.")
     captions = bool(settings["captions_enabled"])
-    if captions and not info["subtitles"]:
-        raise RuntimeError("This ffmpeg can't burn captions. Install a full build (see the home page), "
-                           "or turn captions off in Settings.")
+    hook = bool(settings["hook_enabled"]) and bool((clip.get("hook_title") or "").strip())
+    if (captions or hook) and not info["subtitles"]:
+        raise RuntimeError("This ffmpeg can't draw captions or hook titles. Install a full build (see the home "
+                           "page), or turn captions and hook titles off in Settings.")
 
     jdir = config.job_dir(job["id"])
     src = jdir / job["video_file"]
@@ -180,16 +229,19 @@ def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float],
     else:
         cw, ch, x, y = crop_box(meta["width"], meta["height"], clip.get("crop_x") or 0.5)
         vf = f"crop={cw}:{ch}:{x}:{y},scale={OUT_W}:{OUT_H}:flags=lanczos,setsar=1"
+    # Facebook Reels need 24-60 fps (YouTube is fine either way).
+    if meta.get("fps") and meta["fps"] < 23.5:
+        vf += ",fps=30"
+    elif meta.get("fps") and meta["fps"] > 60.5:
+        vf += ",fps=60"
 
     ass_path = out_dir / f"clip_{clip['id']}.ass"
-    if captions:
-        words = json.loads((jdir / "transcript.json").read_text(encoding="utf-8"))["words"]
-        ass_path.write_text(build_ass(words, clip, settings, layout["split"] if layout else None), encoding="utf-8")
-        # ffmpeg's filter syntax treats ':' as a separator, which breaks on Windows drive letters
-        # (C:\...). Run from the app folder and use relative forward-slash paths instead.
-        ass_rel = ass_path.relative_to(config.ROOT).as_posix()
-        fonts_rel = config.FONTS_DIR.relative_to(config.ROOT).as_posix()
-        vf += f",subtitles=filename='{ass_rel}':fontsdir='{fonts_rel}'"
+    if captions or hook:
+        words = json.loads((jdir / "transcript.json").read_text(encoding="utf-8"))["words"] if captions else []
+        ass_path.write_text(build_ass(words, clip, settings, layout["split"] if layout else None, captions),
+                            encoding="utf-8")
+        # ffmpeg runs inside the clips folder, so the subtitle file needs no path at all.
+        vf += f",subtitles=filename='{ass_path.name}':fontsdir='{_filter_path(config.FONTS_DIR, out_dir)}'"
 
     # A new file name per render: Windows can't overwrite a file the browser is still playing.
     n = 1 + max([int(p.stem.rsplit("_", 1)[-1]) for p in out_dir.glob(f"clip_{clip['id']}_*.mp4")
@@ -207,7 +259,7 @@ def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float],
         "-movflags", "+faststart", str(tmp),
     ]
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=err, text=True, cwd=config.ROOT,
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=err, text=True, cwd=out_dir,
                                 encoding="utf-8", errors="replace",
                                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
         for line in proc.stdout:

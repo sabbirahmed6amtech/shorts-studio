@@ -22,13 +22,14 @@ from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from pipeline import config, tools, worker, youtube  # noqa: E402
+from pipeline import config, facebook, tools, worker, youtube  # noqa: E402
 
 HOST = "127.0.0.1"  # local only: the app holds your API keys and has no login
 PORT = int(os.environ.get("PORT", "8000"))
 VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 ACTIVE = ("downloading", "transcribing", "analyzing")
-CLIP_BUSY_SQL = "(render_status IN ('queued','rendering') OR yt_status IN ('queued','uploading'))"
+CLIP_BUSY_SQL = ("(render_status IN ('queued','rendering') OR yt_status IN ('queued','uploading') "
+                 "OR fb_status IN ('queued','uploading'))")
 
 config.init_db()
 
@@ -254,6 +255,7 @@ class ClipIn(BaseModel):
     description: str | None = None
     hashtags: list[str] | None = None
     crop_x: float | None = None
+    hook_title: str | None = None
 
 
 def _out(clip: dict, settings: dict | None = None, job: dict | None = None) -> dict:
@@ -329,7 +331,7 @@ def update_clip(clip_id: int, body: ClipIn):
 @app.delete("/api/clips/{clip_id}")
 def delete_clip(clip_id: int):
     clip = _clip_or_404(clip_id)
-    if clip["render_status"] == "rendering" or clip["yt_status"] == "uploading":
+    if clip["render_status"] == "rendering" or "uploading" in (clip["yt_status"], clip["fb_status"]):
         raise HTTPException(409, "This clip is rendering or uploading. Wait for it to finish.")
     with config.db() as c:
         c.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
@@ -365,6 +367,8 @@ def cancel_clip(clip_id: int):
     clip = _clip_or_404(clip_id)
     if clip["yt_status"] == "queued":
         config.update_clip(clip_id, yt_status="", yt_publish_at=None)
+    if clip["fb_status"] == "queued":
+        config.update_clip(clip_id, fb_status="", fb_publish_at=None)
     if clip["render_status"] == "queued":
         config.update_clip(clip_id, render_status="done" if clip["render_file"] else "")
     return _clip_or_404(clip_id)
@@ -448,11 +452,24 @@ def youtube_auth_callback(request: Request, state: str = "", error: str = ""):
 
 
 def _taken_slots(exclude_clip: int | None = None) -> list[datetime]:
+    """Publish times already used on any platform."""
     with config.db() as c:
-        rows = c.execute("SELECT id, yt_publish_at FROM clips WHERE yt_publish_at IS NOT NULL "
-                         "AND yt_status IN ('queued','uploading','scheduled')").fetchall()
-    return [datetime.fromisoformat(r["yt_publish_at"].replace("Z", "+00:00"))
-            for r in rows if r["id"] != exclude_clip]
+        rows = c.execute(
+            "SELECT id, yt_publish_at AS t FROM clips WHERE yt_publish_at IS NOT NULL "
+            "AND yt_status IN ('queued','uploading','scheduled') "
+            "UNION ALL SELECT id, fb_publish_at AS t FROM clips WHERE fb_publish_at IS NOT NULL "
+            "AND fb_status IN ('queued','uploading','scheduled')").fetchall()
+    return [datetime.fromisoformat(r["t"].replace("Z", "+00:00")) for r in rows if r["id"] != exclude_clip]
+
+
+def _parse_when(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, "Invalid publish time.")
+    return when if when.tzinfo else when.astimezone()
 
 
 def _iso(dt: datetime) -> str:
@@ -502,25 +519,114 @@ def upload_clip(clip_id: int, body: UploadIn):
 
 
 @app.post("/api/jobs/{job_id}/schedule-all")
-def schedule_all(job_id: int):
-    """Schedule every clip of this video that isn't on YouTube yet, best score first, one per slot."""
-    if not config.YT_TOKEN_PATH.exists():
-        raise HTTPException(400, "Connect YouTube in Settings first.")
-    todo = [c for c in list_clips(job_id) if c["yt_status"] in ("", "error")]
-    todo.sort(key=lambda c: -(c["score"] if c["score"] is not None else -1))
-    slots = youtube.next_slots(len(todo), _taken_slots(), config.get_settings()) if todo else []
+def schedule_all(job_id: int, dry_run: int = 0):
+    """Schedule every clip of this video that isn't posted yet, best score first, one slot per clip,
+    to each platform turned on under Settings → Publishing. dry_run=1 only reports the plan."""
+    s = config.get_settings()
+    use_yt = bool(s["schedule_youtube"]) and config.YT_TOKEN_PATH.exists()
+    use_fb = bool(s["schedule_facebook"]) and facebook.connected()
+    if not (use_yt or use_fb):
+        raise HTTPException(400, "Connect YouTube or Facebook in Settings (and turn it on under Publishing).")
+    clips = list_clips(job_id)
+    fb_len_ok = lambda c: facebook.MIN_SECONDS <= c["end"] - c["start"] <= facebook.MAX_SECONDS + 0.5
+    need_yt = lambda c: use_yt and c["yt_status"] in ("", "error")
+    need_fb = lambda c: use_fb and c["fb_status"] in ("", "error") and fb_len_ok(c)
+    todo = sorted((c for c in clips if need_yt(c) or need_fb(c)),
+                  key=lambda c: -(c["score"] if c["score"] is not None else -1))
+    slots = youtube.next_slots(len(todo), _taken_slots(), s) if todo else []
+    fb_limit = datetime.now(timezone.utc) + timedelta(days=29)
+    too_long = sum(1 for c in clips if use_fb and c["fb_status"] in ("", "error") and not fb_len_ok(c))
+    plan = {"queued": len(todo), "slots": [_iso(t) for t in slots],
+            "platforms": [p for p, on in (("YouTube", use_yt), ("Facebook", use_fb)) if on],
+            "fb_skipped_length": too_long,
+            "fb_skipped_far": sum(1 for c, w in zip(todo, slots) if need_fb(c) and w > fb_limit)}
+    if dry_run:
+        return plan
     for clip, when in zip(todo, slots):
-        _queue_upload(clip, _iso(when), None)
-    return {"queued": len(todo), "slots": [_iso(t) for t in slots]}
+        if need_yt(clip):
+            _queue_upload(clip, _iso(when), None)
+        if need_fb(clip) and when <= fb_limit:
+            _queue_fb(clip, _iso(when))
+    return plan
+
+
+# ---------- Facebook ----------
+
+class FacebookConnect(BaseModel):
+    app_id: str
+    app_secret: str
+    user_token: str
+
+
+class FacebookPage(BaseModel):
+    page_id: str
+
+
+@app.get("/api/facebook/status")
+def facebook_status():
+    return facebook.status()
+
+
+@app.post("/api/facebook/connect")
+def facebook_connect(body: FacebookConnect):
+    try:
+        return facebook.connect(body.app_id, body.app_secret, body.user_token)
+    except facebook.FacebookError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/facebook/page")
+def facebook_page(body: FacebookPage):
+    try:
+        return facebook.select_page(body.page_id)
+    except facebook.FacebookError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/facebook/disconnect")
+def facebook_disconnect():
+    facebook.disconnect()
+    return facebook.status()
+
+
+class FacebookPostIn(BaseModel):
+    publish_at: str | None = None  # ISO time; empty = post right away
+
+
+def _queue_fb(clip: dict, publish_at: str | None) -> None:
+    config.update_clip(clip["id"], fb_status="queued", fb_progress=0, fb_error=None,
+                       fb_publish_at=publish_at, fb_video_id=None)
+    worker.enqueue_output(clip["id"], "fb_upload")
+
+
+@app.post("/api/clips/{clip_id}/facebook")
+def facebook_post(clip_id: int, body: FacebookPostIn):
+    clip = _clip_or_404(clip_id)
+    if not facebook.connected():
+        raise HTTPException(400, "Connect a Facebook Page in Settings first.")
+    if clip["fb_status"] in ("queued", "uploading"):
+        raise HTTPException(409, "This clip is already being posted to Facebook.")
+    if clip["fb_status"] in ("scheduled", "published") and clip["fb_video_id"]:
+        raise HTTPException(409, "This clip is already on Facebook. Change or delete it in Meta Business Suite.")
+    when = _parse_when(body.publish_at)
+    try:
+        facebook.check_length(clip["end"] - clip["start"])
+        if when:
+            facebook.check_schedule(when)
+    except facebook.FacebookError as e:
+        raise HTTPException(400, str(e))
+    _queue_fb(clip, _iso(when) if when else None)
+    return _clip_or_404(clip_id)
 
 
 @app.get("/api/schedule")
 def schedule():
-    """Everything sent (or being sent) to YouTube, across all videos."""
+    """Everything sent (or being sent) to YouTube or Facebook, across all videos."""
     with config.db() as c:
         rows = c.execute(
             "SELECT c.*, j.title AS job_title FROM clips c JOIN jobs j ON j.id = c.job_id "
-            "WHERE c.yt_status != '' ORDER BY COALESCE(c.yt_publish_at, c.yt_uploaded_at, c.created_at) DESC"
+            "WHERE c.yt_status != '' OR c.fb_status != '' "
+            "ORDER BY COALESCE(c.yt_publish_at, c.fb_publish_at, c.yt_uploaded_at, c.created_at) DESC"
         ).fetchall()
     return [config.clip_row(r) for r in rows]
 
