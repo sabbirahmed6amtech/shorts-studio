@@ -35,6 +35,10 @@
             </datalist>
             <span class="hint">If Gemini says the model was not found, check the current names on Google's model list.</span>
           </label>
+          <label>Backup model
+            <input type="text" name="gemini_fallback_model" list="models" placeholder="None">
+            <span class="hint">Used automatically when the main model is overloaded ("high demand").</span>
+          </label>
           <label>Style of clips (optional)
             <input type="text" name="tone" placeholder="e.g. educational, funny, motivational">
             <span class="hint">Extra guidance for Gemini when it picks clips.</span>
@@ -111,6 +115,18 @@
       <section class="card">
         <h2>Transcription</h2>
         <div class="form-grid">
+          <label class="full">Transcript source
+            <select name="transcript_source">
+              <option value="auto">Auto: YouTube captions when available, otherwise Whisper (recommended)</option>
+              <option value="youtube">YouTube captions only: fastest, never runs Whisper</option>
+              <option value="whisper">Whisper only: most accurate, slowest</option>
+              <option value="none">No transcript: loudness only (gameplay without talking)</option>
+            </select>
+            <span class="hint">YouTube captions take seconds instead of minutes. Auto-generated ones include word timing, so captions stay in sync. Uploaded files always use Whisper (or nothing). Applies to new videos.</span>
+          </label>
+          <label class="check-label full"><input type="checkbox" name="loudness_hints"> Loudness hints: tell Gemini where the audio gets loud, including stretches with no speech</label>
+          <span class="hint full" style="margin-top:-10px">Helps with streams and gaming, where the best moments are reactions and action rather than talking.</span>
+          <label class="check-label full"><input type="checkbox" name="whisper_fast"> Faster Whisper: about twice as fast, slightly less accurate</label>
           <label>Whisper model
             <select name="whisper_model">
               <option value="tiny">tiny: fastest, least accurate</option>

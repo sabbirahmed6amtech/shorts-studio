@@ -41,6 +41,7 @@ def transcribe(wav: Path, out_json: Path, settings: dict, on_progress: Callable[
         language=settings["language"] or None,
         word_timestamps=True,
         vad_filter=True,
+        beam_size=1 if settings.get("whisper_fast", True) else 5,
     )
     words = []
     for seg in segments:  # generator: transcription happens while iterating
@@ -51,7 +52,8 @@ def transcribe(wav: Path, out_json: Path, settings: dict, on_progress: Callable[
         if info.duration:
             on_progress(min(1.0, seg.end / info.duration))
 
-    data = {"language": info.language, "duration": info.duration, "words": words, "lines": build_lines(words)}
+    data = {"language": info.language, "duration": info.duration, "words": words,
+            "lines": build_lines(words), "source": "whisper"}
     out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return data
 

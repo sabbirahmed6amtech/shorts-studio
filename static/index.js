@@ -100,6 +100,7 @@ function jobHtml(j) {
         <div class="meta">
           <span class="pill ${st.cls}">${st.label}${busy && pct ? ` · ${pct}%` : ""}</span>
           ${j.duration ? `<span>${fmtTime(j.duration)}</span>` : ""}
+          ${j.transcript_source ? `<span>${{ youtube: "YouTube captions", whisper: "Whisper transcript", none: "No transcript" }[j.transcript_source] || ""}</span>` : ""}
           ${j.status === "ready" ? `<span>${j.clip_count} clip${j.clip_count === 1 ? "" : "s"}</span>` : ""}
           <span>${new Date(j.created_at).toLocaleString()}</span>
         </div>

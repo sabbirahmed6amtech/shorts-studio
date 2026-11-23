@@ -1,5 +1,6 @@
 """Paths, settings and the SQLite database."""
 import json
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("SHORTS_DATA_DIR") or ROOT / "data")  # override for tests
 JOBS_DIR = DATA_DIR / "jobs"
 MODELS_DIR = DATA_DIR / "models"
 DB_PATH = DATA_DIR / "app.db"
@@ -19,6 +20,10 @@ YT_TOKEN_PATH = DATA_DIR / "youtube_token.json"
 DEFAULT_SETTINGS = {
     "gemini_api_key": "",
     "gemini_model": "gemini-3.8-flash",
+    "gemini_fallback_model": "gemini-3.5-flash-lite",  # tried when the main model is overloaded
+    "transcript_source": "auto",  # auto | youtube | whisper | none
+    "loudness_hints": True,    # tell Gemini where the audio gets loud, incl. stretches with no speech
+    "whisper_fast": True,      # greedy decoding: much faster, slightly less accurate
     "whisper_model": "small",
     "whisper_device": "cpu",
     "language": "",            # "" = auto-detect
@@ -29,6 +34,7 @@ DEFAULT_SETTINGS = {
     "tone": "",                # extra guidance for Gemini, e.g. "educational"
     "default_hashtags": "#shorts",
     "ffmpeg_path": "",         # "" = auto-detect
+    "layout_default": "",      # JSON of the last layout used; new videos start from it
     # captions
     "captions_enabled": True,
     "caption_font": "Anton",
@@ -121,11 +127,21 @@ def init_db() -> None:
             """
         )
         # Columns added after the first version: add them to existing databases.
+        have_jobs = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
+        for col, decl in JOB_COLUMNS:
+            if col not in have_jobs:
+                c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
         have = {r["name"] for r in c.execute("PRAGMA table_info(clips)")}
         for col, decl in CLIP_COLUMNS:
             if col not in have:
                 c.execute(f"ALTER TABLE clips ADD COLUMN {col} {decl}")
 
+
+JOB_COLUMNS = [
+    ("layout", "TEXT DEFAULT 'single'"),     # 'single' (one 9:16 crop) | 'split' (streamer on top, content below)
+    ("layout_json", "TEXT"),                 # {"split": 0.4, "cam": {x,y,w,h}, "content": {x,y,w,h}}, 0..1 of the frame
+    ("transcript_source", "TEXT"),           # where the transcript came from: youtube | whisper | none
+]
 
 CLIP_COLUMNS = [
     ("render_status", "TEXT DEFAULT ''"),    # '' | queued | rendering | done | error

@@ -13,9 +13,22 @@ OUT_W, OUT_H = 1080, 1920
 SENTENCE_END = (".", "?", "!", "…", "。", "？", "！")
 
 
-def render_sig(clip: dict, settings: dict) -> str:
+def job_layout(job: dict) -> dict | None:
+    """The split layout of a video, or None for the normal single crop."""
+    if (job or {}).get("layout") != "split" or not job.get("layout_json"):
+        return None
+    data = json.loads(job["layout_json"])
+    data["split"] = min(0.6, max(0.25, float(data.get("split", 0.4))))
+    return data
+
+
+def render_sig(clip: dict, settings: dict, job: dict | None = None) -> str:
     """Fingerprint of everything that changes the output; a different value means re-render."""
-    data = {"start": clip["start"], "end": clip["end"], "crop_x": round(clip.get("crop_x") or 0.5, 3),
+    if job is None:
+        job = config.get_job(clip["job_id"])
+    layout = job_layout(job)
+    data = {"start": clip["start"], "end": clip["end"],
+            "crop": layout if layout else round(clip.get("crop_x") or 0.5, 3),
             **{k: settings[k] for k in config.CAPTION_KEYS}}
     return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -65,10 +78,13 @@ def caption_chunks(words: list[dict], start: float, end: float, per_chunk: int, 
     return chunks
 
 
-def build_ass(words: list[dict], clip: dict, s: dict) -> str:
+def build_ass(words: list[dict], clip: dict, s: dict, split: float | None = None) -> str:
     primary, highlight = _ass_color(s["caption_color"]), _ass_color(s["caption_highlight"])
-    margin_v = int(OUT_H * max(2, min(90, int(s["caption_position"]))) / 100)
     size = max(30, min(200, int(s["caption_size"])))
+    if split:  # streamer + content: centre the captions on the line between the two parts
+        margin_v = int(OUT_H * (1 - split) - size * 0.55)
+    else:
+        margin_v = int(OUT_H * max(2, min(90, int(s["caption_position"]))) / 100)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {OUT_W}
@@ -114,6 +130,23 @@ def crop_box(width: int, height: int, crop_x: float) -> tuple[int, int, int, int
     return cw, ch, 0, max(0, (height - ch) // 2)
 
 
+def fit_rect(r: dict, width: int, height: int, out_w: int, out_h: int) -> tuple[int, int, int, int]:
+    """Pixel crop (w, h, x, y) for a 0..1 rect, shrunk around its centre to exactly the output's
+    shape so nothing is stretched, and kept inside the frame."""
+    w, h = max(0.02, r["w"]) * width, max(0.02, r["h"]) * height
+    cx, cy = (r["x"] + r["w"] / 2) * width, (r["y"] + r["h"] / 2) * height
+    target = out_w / out_h
+    if w / h > target:
+        w = h * target
+    else:
+        h = w / target
+    w, h = min(w, width), min(h, height)
+    w, h = max(2, int(w) // 2 * 2), max(2, int(h) // 2 * 2)
+    x = int(round(min(max(cx - w / 2, 0), width - w)))
+    y = int(round(min(max(cy - h / 2, 0), height - h)))
+    return w, h, x, y
+
+
 # ---------- render ----------
 
 def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float], None]) -> Path:
@@ -133,13 +166,25 @@ def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float],
     out_dir = jdir / "clips"
     out_dir.mkdir(exist_ok=True)
 
-    cw, ch, x, y = crop_box(meta["width"], meta["height"], clip.get("crop_x") or 0.5)
-    vf = f"crop={cw}:{ch}:{x}:{y},scale={OUT_W}:{OUT_H}:flags=lanczos,setsar=1"
+    layout = job_layout(job)
+    if layout:
+        # Streamer on top, content below, stacked into one 1080x1920 frame.
+        top_h = int(OUT_H * layout["split"]) // 2 * 2
+        bot_h = OUT_H - top_h
+        a = fit_rect(layout["cam"], meta["width"], meta["height"], OUT_W, top_h)
+        b = fit_rect(layout["content"], meta["width"], meta["height"], OUT_W, bot_h)
+        vf = (f"split=2[a][b];"
+              f"[a]crop={a[0]}:{a[1]}:{a[2]}:{a[3]},scale={OUT_W}:{top_h}:flags=lanczos,setsar=1[top];"
+              f"[b]crop={b[0]}:{b[1]}:{b[2]}:{b[3]},scale={OUT_W}:{bot_h}:flags=lanczos,setsar=1[bot];"
+              f"[top][bot]vstack=inputs=2")
+    else:
+        cw, ch, x, y = crop_box(meta["width"], meta["height"], clip.get("crop_x") or 0.5)
+        vf = f"crop={cw}:{ch}:{x}:{y},scale={OUT_W}:{OUT_H}:flags=lanczos,setsar=1"
 
     ass_path = out_dir / f"clip_{clip['id']}.ass"
     if captions:
         words = json.loads((jdir / "transcript.json").read_text(encoding="utf-8"))["words"]
-        ass_path.write_text(build_ass(words, clip, settings), encoding="utf-8")
+        ass_path.write_text(build_ass(words, clip, settings, layout["split"] if layout else None), encoding="utf-8")
         # ffmpeg's filter syntax treats ':' as a separator, which breaks on Windows drive letters
         # (C:\...). Run from the app folder and use relative forward-slash paths instead.
         ass_rel = ass_path.relative_to(config.ROOT).as_posix()
@@ -156,7 +201,7 @@ def render(clip: dict, job: dict, settings: dict, on_progress: Callable[[float],
     args = [
         info["ffmpeg"], "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
         "-ss", f"{clip['start']:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
-        "-vf", vf,
+        "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
         "-movflags", "+faststart", str(tmp),

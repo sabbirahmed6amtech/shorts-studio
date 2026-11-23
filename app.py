@@ -114,6 +114,7 @@ def create_job(body: NewJob):
         cur = c.execute("INSERT INTO jobs(source, url, status, created_at) VALUES('url', ?, 'queued', ?)",
                         (url, config.now_iso()))
         job_id = cur.lastrowid
+    _apply_default_layout(job_id)
     worker.enqueue(job_id)
     return config.get_job(job_id)
 
@@ -128,11 +129,54 @@ def upload_job(file: UploadFile = File(...)):
         cur = c.execute("INSERT INTO jobs(source, title, status, video_file, created_at) "
                         "VALUES('upload', ?, 'queued', ?, ?)", (title, f"source{ext}", config.now_iso()))
         job_id = cur.lastrowid
+    _apply_default_layout(job_id)
     d = config.job_dir(job_id)
     d.mkdir(parents=True, exist_ok=True)
     with open(d / f"source{ext}", "wb") as out:
         shutil.copyfileobj(file.file, out, length=1024 * 1024)
     worker.enqueue(job_id)
+    return config.get_job(job_id)
+
+
+def _apply_default_layout(job_id: int) -> None:
+    raw = config.get_settings().get("layout_default")
+    if raw:
+        d = json.loads(raw)
+        config.update_job(job_id, layout=d.get("mode", "single"), layout_json=json.dumps(d.get("data")) if d.get("data") else None)
+
+
+class Rect(BaseModel):
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+class LayoutIn(BaseModel):
+    mode: str                      # 'single' | 'split'
+    split: float = 0.4             # share of the height the streamer part takes
+    cam: Rect | None = None
+    content: Rect | None = None
+
+
+@app.put("/api/jobs/{job_id}/layout")
+def set_layout(job_id: int, body: LayoutIn):
+    _job_or_404(job_id)
+    if body.mode not in ("single", "split"):
+        raise HTTPException(400, "Unknown layout.")
+    data = None
+    if body.mode == "split":
+        if not body.cam or not body.content:
+            raise HTTPException(400, "Place both the streamer and the content box.")
+        for r in (body.cam, body.content):
+            if r.w <= 0.01 or r.h <= 0.01 or r.x < -0.01 or r.y < -0.01 or r.x + r.w > 1.01 or r.y + r.h > 1.01:
+                raise HTTPException(400, "A box is outside the video.")
+        data = {"split": min(0.6, max(0.25, body.split)), "cam": body.cam.model_dump(), "content": body.content.model_dump()}
+    else:
+        old = config.get_job(job_id)["layout_json"]  # keep the boxes so switching back restores them
+        data = json.loads(old) if old else None
+    config.update_job(job_id, layout=body.mode, layout_json=json.dumps(data) if data else None)
+    config.save_settings({"layout_default": json.dumps({"mode": body.mode, "data": data})})
     return config.get_job(job_id)
 
 
@@ -212,9 +256,9 @@ class ClipIn(BaseModel):
     crop_x: float | None = None
 
 
-def _out(clip: dict, settings: dict | None = None) -> dict:
+def _out(clip: dict, settings: dict | None = None, job: dict | None = None) -> dict:
     """Add what the UI needs: is the render up to date with the clip's current edits?"""
-    clip["render_current"] = worker.render_is_current(clip, settings)
+    clip["render_current"] = worker.render_is_current(clip, settings, job)
     return clip
 
 
@@ -234,11 +278,11 @@ def _check_range(start: float, end: float, duration: float | None):
 
 @app.get("/api/jobs/{job_id}/clips")
 def list_clips(job_id: int):
-    _job_or_404(job_id)
+    job = _job_or_404(job_id)
     with config.db() as c:
         rows = c.execute("SELECT * FROM clips WHERE job_id = ? ORDER BY start", (job_id,)).fetchall()
     s = config.get_settings()
-    return [_out(config.clip_row(r), s) for r in rows]
+    return [_out(config.clip_row(r), s, job) for r in rows]
 
 
 @app.post("/api/jobs/{job_id}/clips")
@@ -311,7 +355,7 @@ def render_clip(clip_id: int):
 @app.post("/api/jobs/{job_id}/render-all")
 def render_all(job_id: int):
     s = config.get_settings()
-    n = sum(_queue_render(c) for c in list_clips(job_id) if not worker.render_is_current(c, s))
+    n = sum(_queue_render(c) for c in list_clips(job_id) if not c["render_current"])
     return {"queued": n}
 
 

@@ -13,7 +13,7 @@ import threading
 import time
 import traceback
 
-from . import ai, config, tools, youtube
+from . import ai, captions, config, loudness, tools, youtube
 from .download import download
 from .render import render, render_sig
 from .transcribe import transcribe
@@ -119,19 +119,19 @@ class _Throttle:
             self.update(self.row_id, **{self.field: round(p, 3)})
 
 
-def render_is_current(clip: dict, settings: dict | None = None) -> bool:
+def render_is_current(clip: dict, settings: dict | None = None, job: dict | None = None) -> bool:
     if clip.get("render_status") != "done" or not clip.get("render_file"):
         return False
     if not (config.job_dir(clip["job_id"]) / "clips" / clip["render_file"]).exists():
         return False
-    return clip.get("render_sig") == render_sig(clip, settings or config.get_settings())
+    return clip.get("render_sig") == render_sig(clip, settings or config.get_settings(), job)
 
 
 def _render(clip: dict) -> dict:
     s = config.get_settings()
     job = config.get_job(clip["job_id"])
     config.update_clip(clip["id"], render_status="rendering", render_progress=0, render_error=None)
-    sig = render_sig(clip, s)
+    sig = render_sig(clip, s, job)
     out = render(clip, job, s, _Throttle(clip["id"], "render_progress", config.update_clip))
     old = clip.get("render_file")
     config.update_clip(clip["id"], render_status="done", render_progress=1, render_file=out.name,
@@ -195,10 +195,38 @@ def _process(job_id: int) -> None:
     # 3. Transcribe
     tr = d / "transcript.json"
     if not tr.exists():
-        transcribe(wav, tr, config.get_settings(), _Throttle(job_id))
+        _make_transcript(job, d, wav, meta["duration"], tr, job_id)
 
     # 4. Gemini
     _analyze(job_id)
+
+
+def _make_transcript(job: dict, d, wav, duration: float, tr, job_id: int) -> None:
+    """YouTube captions, Whisper or nothing, depending on Settings → Transcript source."""
+    s = config.get_settings()
+    mode = s["transcript_source"]
+    note = None
+    if mode in ("auto", "youtube") and job["source"] == "url":
+        sub = next(iter(sorted(d.glob("captions*.json3"))), None)
+        if sub is None:
+            sub, note = captions.fetch(job["url"], d, s["language"])
+        if sub is not None:
+            data = captions.parse(sub, duration)
+            if data["words"]:
+                tr.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                config.update_job(job_id, transcript_source="youtube")
+                return
+            note = "The YouTube captions were empty."
+    if mode in ("auto", "whisper"):
+        if note:
+            config.update_job(job_id, message=f"{note} Transcribing with Whisper instead.")
+        transcribe(wav, tr, s, _Throttle(job_id))
+        config.update_job(job_id, transcript_source="whisper", message=None)
+        return
+    # 'none', or 'youtube' without captions: no speech; loudness hints can still guide Gemini.
+    tr.write_text(json.dumps({"language": "", "duration": duration, "words": [], "lines": [], "source": "none"}),
+                  encoding="utf-8")
+    config.update_job(job_id, transcript_source="none", message=note if mode == "youtube" else None)
 
 
 def _analyze(job_id: int) -> None:
@@ -210,9 +238,13 @@ def _analyze(job_id: int) -> None:
     data = json.loads(tr.read_text(encoding="utf-8"))
     s = config.get_settings()
     try:
-        suggestions = ai.suggest(data["lines"], s)
+        lines = data["lines"]
+        wav = config.job_dir(job_id) / "audio.wav"
+        if s["loudness_hints"] and wav.exists():
+            lines = loudness.annotate(lines, wav, job["duration"] or data["duration"])
+        suggestions = ai.suggest(lines, s, job["title"] or "")
         tags = [t if t.startswith("#") else f"#{t}" for t in s["default_hashtags"].split()]
-        clips = ai.to_clips(suggestions, data["lines"], s, job["duration"] or data["duration"], tags)
+        clips = ai.to_clips(suggestions, lines, s, job["duration"] or data["duration"], tags)
     except ai.AIError as e:
         # The video is still usable: open the editor and pick clips by hand.
         config.update_job(job_id, status="ready", progress=1, ai_error=str(e))

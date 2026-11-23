@@ -79,6 +79,7 @@ async function init() {
     api("/api/settings").catch(() => ({})),
   ]).then((r) => { settings = r[4]; return r; });
   yt = ytStatus;
+  loadLayout();
   clips = clipList;
   words = transcript.words || [];
   showAiMessage();
@@ -581,15 +582,71 @@ $("#schedule-all").addEventListener("click", async () => {
   }
 });
 
-// ---------- 9:16 crop box ----------
+// ---------- framing: one 9:16 crop, or streamer on top + content below ----------
 
-let cropGeom = null; // where the video picture sits inside the stage, and the box size
+const OUT_W = 1080, OUT_H = 1920;
+let cropGeom = null;   // where the video picture sits inside the stage (px)
+let liveCropX = null;  // crop centre while dragging, so the preview follows the mouse
+let layout = { mode: "single", split: 0.4, cam: null, content: null };
+
+function loadLayout() {
+  const data = job.layout_json ? JSON.parse(job.layout_json) : null;
+  layout = { mode: job.layout || "single", split: data?.split ?? 0.4, cam: data?.cam || null, content: data?.content || null };
+  syncLayoutControls();
+}
+
+/** Shape (width / height, in source pixels) each part must have so the Short isn't stretched. */
+function partAspect(which) {
+  const topH = Math.round((OUT_H * layout.split) / 2) * 2;
+  return OUT_W / (which === "cam" ? topH : OUT_H - topH);
+}
+
+/** Shrink a 0..1 rect around its centre to the given pixel aspect and keep it in the frame. */
+function fitRect(r, aspect) {
+  const W = video.videoWidth || 1920, H = video.videoHeight || 1080;
+  let w = r.w * W, h = r.h * H;
+  const cx = (r.x + r.w / 2) * W, cy = (r.y + r.h / 2) * H;
+  if (w / h > aspect) w = h * aspect; else h = w / aspect;
+  w = Math.min(w, W, H * aspect);
+  h = w / aspect;
+  const x = Math.min(Math.max(cx - w / 2, 0), W - w);
+  const y = Math.min(Math.max(cy - h / 2, 0), H - h);
+  return { x: x / W, y: y / H, w: w / W, h: h / H };
+}
+
+function defaultLayout() {
+  layout.split = layout.split || 0.4;
+  // Facecam: top-left, about a third of the width. Content: the middle, full height.
+  layout.cam = fitRect({ x: 0.01, y: 0.02, w: 0.32, h: 0.5 }, partAspect("cam"));
+  layout.content = fitRect({ x: 0.2, y: 0, w: 0.6, h: 1 }, partAspect("content"));
+}
+
+function syncLayoutControls() {
+  document.querySelectorAll("#layout-mode button").forEach((b) => b.classList.toggle("active", b.dataset.mode === layout.mode));
+  $("#split-wrap").classList.toggle("hidden", layout.mode !== "split");
+  $("#split").value = Math.round(layout.split * 100);
+  $("#split-val").textContent = `${Math.round(layout.split * 100)}%`;
+}
+
+let saveTimer;
+function saveLayout() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      const body = { mode: layout.mode, split: layout.split };
+      if (layout.mode === "split") Object.assign(body, { cam: layout.cam, content: layout.content });
+      job = await api(`/api/jobs/${jobId}/layout`, { method: "PUT", body });
+      await reloadClips(); // renders made with the old framing are now out of date
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }, 400);
+}
 
 function layoutCrop() {
   const crop = $("#crop");
-  const c = clipById(selectedId);
   const stage = $("#stage");
-  if (!c || !video.videoWidth) {
+  if (!video.videoWidth) {
     crop.classList.add("hidden");
     cropGeom = null;
     return;
@@ -597,15 +654,30 @@ function layoutCrop() {
   const sw = stage.clientWidth, sh = stage.clientHeight;
   const scale = Math.min(sw / video.videoWidth, sh / video.videoHeight);
   const w = video.videoWidth * scale, h = video.videoHeight * scale;
-  const boxW = Math.min(w, (h * 9) / 16);
-  cropGeom = { w, h, boxW };
+  cropGeom = { w, h, boxW: Math.min(w, (h * 9) / 16) };
   Object.assign(crop.style, { left: `${(sw - w) / 2}px`, top: `${(sh - h) / 2}px`, width: `${w}px`, height: `${h}px` });
-  crop.classList.remove("hidden");
-  placeBox(c.crop_x ?? 0.5);
-  $("#crop-box .tag").textContent = boxW >= w - 1 ? "Already vertical" : "9:16 · drag";
+
+  const split = layout.mode === "split";
+  if (split && (!layout.cam || !layout.content)) defaultLayout();
+  const c = clipById(selectedId);
+  crop.classList.toggle("hidden", !split && !c);
+  for (const el of ["#crop-box", "#shade-l", "#shade-r"]) $(el).classList.toggle("hidden", split);
+  for (const el of ["#box-cam", "#box-content"]) $(el).classList.toggle("hidden", !split);
+  if (split) {
+    placeRect($("#box-cam"), layout.cam);
+    placeRect($("#box-content"), layout.content);
+  } else if (c) {
+    placeBox(c.crop_x ?? 0.5);
+    $("#crop-box .tag").textContent = cropGeom.boxW >= w - 1 ? "Already vertical" : "9:16 · drag";
+  }
 }
 
-/** Position the box for a centre (0..1 of the width). Returns the centre after clamping. */
+function placeRect(el, r) {
+  const { w, h } = cropGeom;
+  Object.assign(el.style, { left: `${r.x * w}px`, top: `${r.y * h}px`, width: `${r.w * w}px`, height: `${r.h * h}px` });
+}
+
+/** Position the single crop for a centre (0..1 of the width). Returns the centre after clamping. */
 function placeBox(cx) {
   const { w, boxW } = cropGeom;
   const left = Math.min(Math.max(cx * w - boxW / 2, 0), w - boxW);
@@ -616,6 +688,7 @@ function placeBox(cx) {
   return w > boxW ? (left + boxW / 2) / w : 0.5;
 }
 
+// Single crop: drag sideways.
 {
   const box = $("#crop-box");
   let drag = null;
@@ -629,7 +702,7 @@ function placeBox(cx) {
   box.addEventListener("pointermove", (e) => {
     if (!drag) return;
     const { w, boxW } = cropGeom;
-    drag.cx = placeBox((drag.left + (e.clientX - drag.x) + boxW / 2) / w);
+    drag.cx = liveCropX = placeBox((drag.left + (e.clientX - drag.x) + boxW / 2) / w);
   });
   const end = async () => {
     if (!drag) return;
@@ -637,10 +710,104 @@ function placeBox(cx) {
     const cx = drag.cx;
     drag = null;
     if (cx != null && selectedId) await patchClip(selectedId, { crop_x: Math.round(cx * 1000) / 1000 });
+    liveCropX = null;
   };
   box.addEventListener("pointerup", end);
   box.addEventListener("pointercancel", end);
 }
+
+// Streamer / content boxes: drag to move, drag the corner to resize (shape stays locked).
+for (const which of ["cam", "content"]) {
+  const el = $(`#box-${which}`);
+  let drag = null;
+  el.addEventListener("pointerdown", (e) => {
+    if (!cropGeom) return;
+    e.preventDefault();
+    e.stopPropagation();
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("dragging");
+    drag = { x: e.clientX, y: e.clientY, r: { ...layout[which] }, resize: !!e.target.closest(".handle") };
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = (e.clientX - drag.x) / cropGeom.w, dy = (e.clientY - drag.y) / cropGeom.h;
+    const r = drag.r;
+    if (drag.resize) {
+      // Width follows the mouse; height follows from the locked shape. Anchored at the top-left.
+      const W = video.videoWidth, H = video.videoHeight, aspect = partAspect(which);
+      let wN = Math.max(0.05, r.w + dx);
+      wN = Math.min(wN, 1 - r.x, ((1 - r.y) * H * aspect) / W);
+      layout[which] = { x: r.x, y: r.y, w: wN, h: (wN * W) / aspect / H };
+    } else {
+      layout[which] = { ...r, x: Math.min(Math.max(r.x + dx, 0), 1 - r.w), y: Math.min(Math.max(r.y + dy, 0), 1 - r.h) };
+    }
+    placeRect(el, layout[which]);
+  });
+  const end = () => {
+    if (!drag) return;
+    drag = null;
+    el.classList.remove("dragging");
+    saveLayout();
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+
+$("#layout-mode").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-mode]");
+  if (!b || b.dataset.mode === layout.mode) return;
+  layout.mode = b.dataset.mode;
+  syncLayoutControls();
+  layoutCrop();
+  saveLayout();
+});
+
+$("#split").addEventListener("input", (e) => {
+  layout.split = Number(e.target.value) / 100;
+  $("#split-val").textContent = `${e.target.value}%`;
+  // Each part's shape depends on the split, so refit both boxes around their centres.
+  layout.cam = fitRect(layout.cam, partAspect("cam"));
+  layout.content = fitRect(layout.content, partAspect("content"));
+  layoutCrop();
+});
+$("#split").addEventListener("change", saveLayout);
+
+// ---------- live 9:16 preview ----------
+
+const preview = $("#preview");
+const pctx = preview.getContext("2d");
+
+function drawPart(r, aspect, dy, dh) {
+  const W = video.videoWidth, H = video.videoHeight;
+  const f = fitRect(r, aspect);
+  pctx.drawImage(video, f.x * W, f.y * H, f.w * W, f.h * H, 0, dy, preview.width, dh);
+}
+
+function drawPreview() {
+  requestAnimationFrame(drawPreview);
+  if (!video.videoWidth || video.readyState < 2 || !preview.offsetParent) return;
+  const pw = preview.width, ph = preview.height;
+  pctx.fillStyle = "#000";
+  pctx.fillRect(0, 0, pw, ph);
+  if (layout.mode === "split" && layout.cam && layout.content) {
+    const topH = Math.round(ph * layout.split);
+    drawPart(layout.cam, partAspect("cam"), 0, topH);
+    drawPart(layout.content, partAspect("content"), topH, ph - topH);
+  } else {
+    const W = video.videoWidth, H = video.videoHeight;
+    const c = clipById(selectedId);
+    const cx = liveCropX ?? c?.crop_x ?? 0.5;
+    if (W / H > 9 / 16) {
+      const cw = (H * 9) / 16;
+      const x = Math.min(Math.max(cx * W - cw / 2, 0), W - cw);
+      pctx.drawImage(video, x, 0, cw, H, 0, 0, pw, ph);
+    } else {
+      const ch = (W * 16) / 9;
+      pctx.drawImage(video, 0, (H - ch) / 2, W, ch, 0, 0, pw, ph);
+    }
+  }
+}
+requestAnimationFrame(drawPreview);
 
 // ---------- toolbar ----------
 

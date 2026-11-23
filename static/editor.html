@@ -14,14 +14,36 @@
 
   <div class="ed">
     <section class="ed-main">
-      <div class="stage" id="stage">
-        <video id="video" preload="metadata" playsinline></video>
-        <div class="crop hidden" id="crop">
-          <div class="shade" id="shade-l"></div>
-          <div class="shade" id="shade-r"></div>
-          <div class="box" id="crop-box" title="Drag to choose what the vertical Short shows"><span class="tag">9:16 · drag</span></div>
+      <div class="stage-wrap">
+        <div class="stage" id="stage">
+          <video id="video" preload="metadata" playsinline></video>
+          <div class="crop hidden" id="crop">
+            <div class="shade" id="shade-l"></div>
+            <div class="shade" id="shade-r"></div>
+            <div class="box" id="crop-box" title="Drag to choose what the vertical Short shows"><span class="tag">9:16 · drag</span></div>
+            <div class="lbox cam hidden" id="box-cam" title="Drag over the streamer's camera. Drag the corner to resize.">
+              <span class="tag">Streamer · top</span><span class="handle" aria-hidden="true"></span></div>
+            <div class="lbox content hidden" id="box-content" title="Drag over the game or screen. Drag the corner to resize.">
+              <span class="tag">Content · bottom</span><span class="handle" aria-hidden="true"></span></div>
+          </div>
+          <div class="overlay-msg hidden" id="stage-msg"></div>
         </div>
-        <div class="overlay-msg hidden" id="stage-msg"></div>
+        <div class="preview-col">
+          <canvas id="preview" width="270" height="480" aria-label="Preview of the vertical Short"></canvas>
+          <span class="muted small">Preview</span>
+        </div>
+      </div>
+      <div class="toolbar">
+        <span class="muted small">Layout</span>
+        <div class="seg" id="layout-mode" role="group" aria-label="Layout">
+          <button data-mode="single" class="active" title="One 9:16 crop that you slide sideways (per clip)">Single crop</button>
+          <button data-mode="split" title="Streamer camera on top, content below (for the whole video)">Streamer + content</button>
+        </div>
+        <label class="row hidden" id="split-wrap" style="font-weight:400" title="How much of the Short the streamer part takes">
+          <span class="muted small">Streamer height</span>
+          <input type="range" id="split" min="25" max="60" value="40">
+          <span class="small" id="split-val">40%</span>
+        </label>
       </div>
 
       <div class="toolbar">
