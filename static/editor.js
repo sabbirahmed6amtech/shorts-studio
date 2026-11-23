@@ -914,6 +914,77 @@ $("#rerun").addEventListener("click", async () => {
   }
 });
 
+// ---------- other AI tools: copy the prompt, paste the reply ----------
+
+function extShow(open) {
+  $("#ext-modal").classList.toggle("hidden", !open);
+  if (open) $("#ext-reply").focus();
+}
+
+$("#ext-open").addEventListener("click", async () => {
+  $("#ext-error").classList.add("hidden");
+  $("#ext-prompt").value = "Preparing…";
+  extShow(true);
+  try {
+    const r = await api(`/api/jobs/${jobId}/prompt`);
+    $("#ext-prompt").value = r.prompt;
+    $("#ext-size").textContent = `${r.chars.toLocaleString()} characters · ${r.lines.toLocaleString()} lines`;
+    const big = r.chars > 40000;
+    $("#ext-warn").classList.toggle("hidden", !big);
+    $("#ext-warn").textContent = big
+      ? "This prompt is long. Free versions of some AI tools may cut it off; if the reply looks incomplete, try another tool or a paid one."
+      : "";
+  } catch (e) {
+    $("#ext-prompt").value = "";
+    $("#ext-error").classList.remove("hidden");
+    $("#ext-error").textContent = e.message;
+  }
+});
+
+$("#ext-close").addEventListener("click", () => extShow(false));
+$("#ext-modal").addEventListener("click", (e) => { if (e.target.id === "ext-modal") extShow(false); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") extShow(false); });
+
+$("#ext-copy").addEventListener("click", async () => {
+  const ta = $("#ext-prompt");
+  try {
+    await navigator.clipboard.writeText(ta.value);
+  } catch {
+    ta.select(); // clipboard blocked: select it so Ctrl/Cmd+C works
+    document.execCommand("copy");
+  }
+  $("#ext-copied").classList.add("show");
+  setTimeout(() => $("#ext-copied").classList.remove("show"), 1500);
+});
+
+$("#ext-import").addEventListener("click", async () => {
+  const btn = $("#ext-import");
+  const err = $("#ext-error");
+  err.classList.add("hidden");
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/jobs/${jobId}/import`, { method: "POST", body: { text: $("#ext-reply").value } });
+    clips = await api(`/api/jobs/${jobId}/clips`);
+    if (!clipById(selectedId)) selectedId = null;
+    job.ai_error = null;
+    addAllRegions();
+    renderList();
+    renderDetail();
+    layoutCrop();
+    showAiMessage();
+    extShow(false);
+    $("#ext-reply").value = "";
+    toast(`Imported ${r.imported} clip${r.imported === 1 ? "" : "s"}` +
+      (r.read > r.imported ? ` (${r.read - r.imported} didn't fit your length settings or overlapped)` : "") +
+      (r.skipped.length ? ` · skipped ${r.skipped.length} unreadable` : ""));
+  } catch (e) {
+    err.classList.remove("hidden");
+    err.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space" || !ws) return;
   if (e.target.closest("input, textarea, select, button, [contenteditable]")) return;

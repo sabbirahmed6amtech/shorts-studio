@@ -45,6 +45,16 @@ Google rules to know:
 - **Uploads stay private until Google audits your project.** Until then, scheduled Shorts won't go public. Apply with the [YouTube API audit form](https://support.google.com/youtube/contact/yt_api_form).
 - **About 6 uploads a day** on the default API quota.
 
+## Using another AI instead of Gemini (optional)
+
+If Gemini is out of free quota or overloaded, press **Use another AI** in the editor:
+
+1. **Copy prompt** copies exactly what Gemini would get (transcript, loudness and chat markers, your clip settings) plus rules to reply with only JSON.
+2. Paste it into ChatGPT, DeepSeek or any other AI, copy its reply, and paste it back.
+3. **Import clips** reads the JSON (even if the AI adds text or code fences around it), applies the same checks as Gemini's answers, and replaces the AI clips you haven't edited.
+
+Very long videos make long prompts; free versions of some AI tools may cut them off.
+
 ## Connecting Facebook (optional)
 
 Settings → Facebook Page walks you through it: create an app at Meta for Developers with

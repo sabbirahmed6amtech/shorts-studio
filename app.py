@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from pipeline import config, facebook, tools, worker, youtube  # noqa: E402
+from pipeline import ai, config, facebook, tools, worker, youtube  # noqa: E402
 
 HOST = "127.0.0.1"  # local only: the app holds your API keys and has no login
 PORT = int(os.environ.get("PORT", "8000"))
@@ -208,6 +208,53 @@ def retry_job(job_id: int):
     config.update_job(job_id, status="queued", progress=0, message=None)
     worker.enqueue(job_id)
     return config.get_job(job_id)
+
+
+# ---------- other AI tools (copy the prompt, paste the reply) ----------
+
+@app.get("/api/jobs/{job_id}/prompt")
+def job_prompt(job_id: int):
+    """The exact prompt Gemini would get, plus reply-format rules, for pasting into any AI tool.
+    The numbered lines are saved so the reply's line numbers still match when it's imported."""
+    job = _job_or_404(job_id)
+    if job["status"] != "ready":
+        raise HTTPException(409, "The video must finish processing first.")
+    s = config.get_settings()
+    lines, duration = worker.analysis_lines(job_id, s)
+    if not lines:
+        raise HTTPException(400, "No speech was found. Turn on Loudness hints in Settings so there's something to send.")
+    prompt = ai.external_prompt(lines, s, job["title"] or "")
+    snapshot = {"lines": lines, "duration": duration, "created_at": config.now_iso(),
+                "settings": {k: s[k] for k in ("clip_min", "clip_max", "clip_count", "min_score", "default_hashtags")}}
+    (config.job_dir(job_id) / "external_prompt.json").write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    return {"prompt": prompt, "chars": len(prompt), "lines": len(lines)}
+
+
+class ImportIn(BaseModel):
+    text: str
+
+
+@app.post("/api/jobs/{job_id}/import")
+def import_reply(job_id: int, body: ImportIn):
+    job = _job_or_404(job_id)
+    if job["status"] != "ready":
+        raise HTTPException(409, "The video must finish processing first.")
+    snap_path = config.job_dir(job_id) / "external_prompt.json"
+    if not snap_path.exists():
+        raise HTTPException(400, "Copy the prompt first, then paste the AI's reply.")
+    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    s = {**config.get_settings(), **snap["settings"]}  # judge the reply by the settings it was asked with
+    try:
+        suggestions, problems = ai.parse_external(body.text)
+        clips = ai.to_clips(suggestions, snap["lines"], s, snap["duration"], worker.default_tags(s))
+    except ai.AIError as e:
+        raise HTTPException(400, str(e))
+    if not clips:
+        raise HTTPException(400, "The reply was read, but none of its clips fit your length settings "
+                                 f"({s['clip_min']}–{s['clip_max']}s) or they overlapped. Nothing was changed.")
+    worker.save_ai_clips(job_id, clips)
+    config.update_job(job_id, ai_error=None)
+    return {"imported": len(clips), "read": len(suggestions), "skipped": problems}
 
 
 @app.post("/api/jobs/{job_id}/analyze")

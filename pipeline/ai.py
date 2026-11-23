@@ -1,4 +1,9 @@
-"""Ask Gemini for clip suggestions + metadata, then clean up what it returns."""
+"""Ask Gemini for clip suggestions + metadata, then clean up what it returns.
+
+The same prompt can be copied into any other AI tool; parse_external() reads its reply.
+"""
+import json
+import re
 import time
 
 from pydantic import BaseModel, Field
@@ -196,3 +201,85 @@ def to_clips(suggestions: list[ClipSuggestion], lines: list[dict], s: dict, dura
         if ok and c["score"] >= int(s["min_score"]):
             kept.append(c)
     return sorted(kept[: int(s["clip_count"])], key=lambda c: c["start"])
+
+
+# ---------- copy-paste mode for other AI tools ----------
+
+EXTERNAL_FORMAT = """
+REPLY FORMAT (important):
+Reply with ONLY a JSON array: no explanation, no markdown, no text before or after it.
+Each item must have exactly these fields:
+[
+  {
+    "start_line": 12,
+    "end_line": 20,
+    "score": 85,
+    "hook": "the opening line that grabs attention",
+    "reason": "one sentence: why this works as a Short",
+    "title": "YouTube Shorts title, under 70 characters, no hashtags",
+    "hook_title": "3-7 word on-screen banner, no emoji",
+    "description": "2-3 sentence description",
+    "hashtags": ["#example", "#shorts"]
+  }
+]
+start_line and end_line are the L numbers from the transcript (end_line is included).
+"""
+
+
+def external_prompt(lines: list[dict], s: dict, title: str = "") -> str:
+    return build_prompt(lines, s, title).rstrip() + "\n" + EXTERNAL_FORMAT
+
+
+_FENCE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.S)
+_TRAILING_COMMA = re.compile(r",\s*([\]}])")
+
+
+def _find_json(text: str):
+    """Pull the JSON out of a chatty reply: code fences, text around it, trailing commas,
+    or an object wrapping the list ({"clips": [...]})."""
+    candidates = [m.group(1) for m in _FENCE.finditer(text)] + [text]
+    for cand in candidates:
+        for opener, closer in (("[", "]"), ("{", "}")):
+            a, b = cand.find(opener), cand.rfind(closer)
+            if a == -1 or b <= a:
+                continue
+            chunk = cand[a:b + 1]
+            for attempt in (chunk, _TRAILING_COMMA.sub(r"\1", chunk)):
+                try:
+                    data = json.loads(attempt)
+                except ValueError:
+                    continue
+                if isinstance(data, dict):
+                    data = next((v for v in data.values() if isinstance(v, list)), None)
+                if isinstance(data, list):
+                    return data
+    return None
+
+
+def parse_external(text: str) -> tuple[list[ClipSuggestion], list[str]]:
+    """Returns (valid suggestions, problems with the items that were skipped)."""
+    data = _find_json(text or "")
+    if data is None:
+        raise AIError("Couldn't find a JSON list in that reply. Ask the AI to answer with only the JSON array, "
+                      "then paste it again.")
+    good, problems = [], []
+    for i, item in enumerate(data, 1):
+        if not isinstance(item, dict):
+            problems.append(f"item {i} isn't an object")
+            continue
+        item = dict(item)
+        item.setdefault("hook", "")
+        item.setdefault("reason", "")
+        item.setdefault("hook_title", "")
+        item.setdefault("description", "")
+        item.setdefault("hashtags", [])
+        if isinstance(item.get("hashtags"), str):
+            item["hashtags"] = item["hashtags"].split()
+        try:
+            good.append(ClipSuggestion.model_validate(item))
+        except Exception as e:
+            missing = [str(err["loc"][0]) for err in getattr(e, "errors", lambda: [])()]
+            problems.append(f"item {i}: " + (f"missing or invalid {', '.join(missing)}" if missing else str(e)[:80]))
+    if not good:
+        raise AIError("None of the clips in that reply could be read (" + "; ".join(problems[:3]) + ").")
+    return good, problems

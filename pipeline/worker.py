@@ -280,31 +280,33 @@ def _fetch_chat(job: dict, d, duration: float, job_id: int) -> None:
         config.update_job(job_id, message=f"Skipped the live chat: {str(e)[:150]}")
 
 
-def _analyze(job_id: int) -> None:
+def analysis_lines(job_id: int, s: dict) -> tuple[list[dict], float]:
+    """The numbered lines the AI reads: transcript plus loudness / chat markers. Shared by the
+    Gemini call and the copy-paste prompt for other AI tools, so both see exactly the same."""
     job = config.get_job(job_id)
     tr = config.job_dir(job_id) / "transcript.json"
     if not tr.exists():
         raise RuntimeError("No transcript yet.")
-    config.update_job(job_id, status="analyzing", progress=0, ai_error=None)
     data = json.loads(tr.read_text(encoding="utf-8"))
-    s = config.get_settings()
-    try:
-        lines = data["lines"]
-        wav = config.job_dir(job_id) / "audio.wav"
-        chat_file = config.job_dir(job_id) / "chat.json"
-        measure = None
-        if s["chat_hints"] and chat_file.exists():
-            measure = chat.spikes(json.loads(chat_file.read_text(encoding="utf-8")))
-        use_wav = wav if s["loudness_hints"] and wav.exists() else None
-        if use_wav or measure:
-            lines = loudness.annotate(lines, use_wav, job["duration"] or data["duration"], chat=measure)
-        suggestions = ai.suggest(lines, s, job["title"] or "")
-        tags = [t if t.startswith("#") else f"#{t}" for t in s["default_hashtags"].split()]
-        clips = ai.to_clips(suggestions, lines, s, job["duration"] or data["duration"], tags)
-    except ai.AIError as e:
-        # The video is still usable: open the editor and pick clips by hand.
-        config.update_job(job_id, status="ready", progress=1, ai_error=str(e))
-        return
+    duration = job["duration"] or data["duration"]
+    lines = data["lines"]
+    wav = config.job_dir(job_id) / "audio.wav"
+    chat_file = config.job_dir(job_id) / "chat.json"
+    measure = None
+    if s["chat_hints"] and chat_file.exists():
+        measure = chat.spikes(json.loads(chat_file.read_text(encoding="utf-8")))
+    use_wav = wav if s["loudness_hints"] and wav.exists() else None
+    if use_wav or measure:
+        lines = loudness.annotate(lines, use_wav, duration, chat=measure)
+    return lines, duration
+
+
+def default_tags(s: dict) -> list[str]:
+    return [t if t.startswith("#") else f"#{t}" for t in s["default_hashtags"].split()]
+
+
+def save_ai_clips(job_id: int, clips: list[dict]) -> None:
+    """Replace AI clips the user hasn't touched; keep clips they made or edited."""
     with config.db() as c:
         c.execute("DELETE FROM clips WHERE job_id = ? AND origin = 'ai' AND edited = 0", (job_id,))
         for cl in clips:
@@ -315,5 +317,20 @@ def _analyze(job_id: int) -> None:
                  json.dumps(cl["hashtags"], ensure_ascii=False), cl["hook"], cl["reason"], cl["hook_title"],
                  config.now_iso()),
             )
+
+
+def _analyze(job_id: int) -> None:
+    job = config.get_job(job_id)
+    config.update_job(job_id, status="analyzing", progress=0, ai_error=None)
+    s = config.get_settings()
+    lines, duration = analysis_lines(job_id, s)
+    try:
+        suggestions = ai.suggest(lines, s, job["title"] or "")
+        clips = ai.to_clips(suggestions, lines, s, duration, default_tags(s))
+    except ai.AIError as e:
+        # The video is still usable: open the editor and pick clips by hand.
+        config.update_job(job_id, status="ready", progress=1, ai_error=str(e))
+        return
+    save_ai_clips(job_id, clips)
     note = None if clips else "Gemini found no clips that fit your length settings. Try a wider range in Settings."
     config.update_job(job_id, status="ready", progress=1, ai_error=note)

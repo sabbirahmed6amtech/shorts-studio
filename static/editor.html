@@ -68,6 +68,7 @@
         <div class="row">
           <span class="muted small grow" id="clip-count"></span>
           <button class="btn sm" id="rerun" title="Ask Gemini again. Clips you created or edited are kept.">↻ Run AI again</button>
+          <button class="btn sm" id="ext-open" title="Copy the prompt into ChatGPT or any other AI, then paste its reply back">Use another AI</button>
         </div>
         <div class="row">
           <button class="btn sm grow" id="render-all" title="Render every clip that isn't rendered or has changed">Render all</button>
@@ -78,6 +79,25 @@
       <div class="clip-list" id="clips"></div>
       <div class="detail hidden" id="detail"></div>
     </aside>
+  </div>
+
+  <div class="modal hidden" id="ext-modal" role="dialog" aria-modal="true" aria-labelledby="ext-title">
+    <div class="modal-box">
+      <div class="row"><h2 class="grow" id="ext-title">Use another AI</h2><button class="btn sm" id="ext-close" aria-label="Close">✕</button></div>
+      <p class="small muted" style="margin:0">Same prompt Gemini gets. Paste it into ChatGPT, DeepSeek or any other AI, then paste its reply below. Imported clips replace AI clips you haven't edited.</p>
+      <div class="ext-step">
+        <div class="row"><b class="grow">1. Copy the prompt</b><span class="small muted" id="ext-size"></span></div>
+        <div class="notice warn small hidden" id="ext-warn"></div>
+        <textarea id="ext-prompt" rows="6" readonly></textarea>
+        <div class="row"><button class="btn primary sm" id="ext-copy">Copy prompt</button><span class="saved" id="ext-copied">Copied</span></div>
+      </div>
+      <div class="ext-step">
+        <b>2. Paste the AI's reply</b>
+        <textarea id="ext-reply" rows="7" placeholder='[ { "start_line": 12, "end_line": 20, "score": 85, ... } ]'></textarea>
+        <div class="notice err small hidden" id="ext-error"></div>
+        <div class="row"><button class="btn primary sm" id="ext-import">Import clips</button></div>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/editor.js"></script>
